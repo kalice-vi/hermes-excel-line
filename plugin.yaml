@@ -1,0 +1,9 @@
+name: excel_line
+version: 0.1.0
+description: "Excel-backed long-term memory. A master index workbook (brief note + path) plus per-zone workbooks. A free-model sub-agent classifies agent I/O logs and writes concise knowledge into the right zone."
+pip_dependencies:
+  - "openpyxl>=3.1.0"
+requires_env: []
+hooks:
+  - on_session_end
+  - on_memory_write

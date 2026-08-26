@@ -1,0 +1,15 @@
+# Runtime data — contains the USER's personal memory. NEVER commit.
+*.xlsx
+logs/
+__pycache__/
+*.processing
+
+# Keep source + tests + docs
+!__init__.py
+!store.py
+!worker.py
+!plugin.yaml
+!README.md
+!CHANGELOG_PR.md
+!qa_excel_line.py
+!tests/
