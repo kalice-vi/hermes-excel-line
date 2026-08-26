@@ -1,14 +1,26 @@
-"""Full QA suite for the excel_line memory provider.
+"""tests/test_excel_line.py — full QA suite for the excel_line memory provider.
 
-Covers the failure modes that made the old plugin "write-only" (data logged
-but never retrievable) and proves the new direct-store path behaves like
-built-in memory.
+INTRODUCTION
+    The authoritative regression suite. It exercises every layer against real
+    openpyxl workbooks in temp dirs (no mocks of the storage path), proving the
+    plugin is not merely "write-only" but actually stores AND retrieves:
 
-Run:
-  cd <hermes>/plugins/excel_line
-  uv run --with openpyxl python -m pytest tests/test_excel_line.py -q
-  # or, without pytest:
-  uv run --with openpyxl python tests/test_excel_line.py
+      - store.py: add / search (unicode, Vietnamese, by title, limit) / read /
+        count / zones / exception safety.
+      - concurrency: 5x20 threads, and concurrent direct-store + worker on one
+        store, and two separate store instances (cross-process) with stale-lock
+        pid recovery.
+      - worker.py: keeps log on classify-fail, raw-backup on fail, deletes on
+        success.
+      - provider: direct-store returns "stored" + retrievable; prefetch() finds
+        drained lazy logs; on_session_end keeps data when the LLM fails.
+
+    This is the suite reported in the PR ("33 tests, all green").
+
+RUN
+    cd <hermes>/plugins/excel_line
+    uv run --with openpyxl python tests/test_excel_line.py
+    # or: uv run --with openpyxl python -m pytest tests/test_excel_line.py -q
 """
 from __future__ import annotations
 import os, sys, json, tempfile, types, threading, time

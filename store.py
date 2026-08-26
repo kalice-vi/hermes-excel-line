@@ -1,20 +1,28 @@
-"""Excel-backed storage for the excel_line memory provider.
+"""store.py — persistence layer for the excel_line memory provider.
 
-Layout
-------
-- MASTER workbook  (excel-line_index.xlsx)
-    Sheet "index": one row per memory entry
-        A id | B zone | C brief | D path | E tags | F created | G updated
-- ZONE workbooks  (<zone>.xlsx)  e.g. user.xlsx, project.xlsx, knowledge.xlsx
-    Sheet "mem":  A id | B title | C content | D tags | E created | F updated
+INTRODUCTION
+    This module owns all Excel read/write for excel_line. It is the single
+    source of truth for durable memory: it appends brief rows to a MASTER index
+    and detailed records to per-zone workbooks, and answers search/read queries.
+    It contains no agent-runtime imports, so it can run standalone (unit tests,
+    the sub-agent worker) without loading the full provider.
 
-All workbooks live under one root dir (default $HERMES_HOME/excel_line/).
-The master index keeps only a brief note + the path to the detailed zone
-record, so the index stays small and human-scannable while deep knowledge
-lives in per-zone files.
+LAYOUT
+    - MASTER workbook (excel-line_index.xlsx)
+        Sheet "index": one row per memory entry
+            A id | B zone | C brief | D title | E path | F tags | G created | H updated
+    - ZONE workbooks (<zone>.xlsx) e.g. user.xlsx, project.xlsx, knowledge.xlsx
+        Sheet "mem": A id | B title | C content | D tags | E created | F updated
 
-This module is pure file I/O (openpyxl) with no agent runtime imports, so it
-can be unit-tested and reused by the sub-agent worker directly.
+    All workbooks live under one root dir (default $HERMES_HOME/excel_line/).
+    The master index keeps only a brief note + title + the path to the detailed
+    zone record, so the index stays small and human-scannable while deep
+    knowledge lives in per-zone files.
+
+THREAD / PROCESS SAFETY
+    Writes are guarded by an in-process RLock AND a cross-process file lock
+    (atomic O_EXCL with pid-checked stale-lock recovery), so concurrent writes
+    from the provider and the background worker never corrupt the workbooks.
 """
 
 from __future__ import annotations

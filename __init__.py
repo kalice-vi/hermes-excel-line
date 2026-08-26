@@ -1,26 +1,30 @@
-"""excel_line — Excel-backed long-term memory provider for Hermes.
+"""__init__.py — Hermes memory provider entry point for excel_line.
 
-REVISED design (per user requirement — agent-driven, NOT turn-driven):
-- The agent itself decides WHEN to persist. After producing an output it deems
-  worth keeping, it calls the excel_line `add` tool with the session id and the
-  sequence numbers of the input/output to log (0 = omit that side).
-- The plugin looks those turns up from a lightweight per-session transcript
-  buffer (recorded by sync_turn, NEVER auto-indexed), writes a log file, and
-  triggers the free-model sub-agent indexer.
-- The sub-agent drains the log folder continuously: while any log file remains,
-  it keeps running, processing+deleting one log at a time. No turn-based or
-  session-end dumping.
+INTRODUCTION
+    This is the plugin's public surface: it registers the excel_line memory
+    provider with Hermes and wires together the three moving parts — the tool
+    handlers (add / search / read), the auto-retrieve hook (prefetch), and the
+    background indexer (worker.py). It decides WHEN to persist and HOW memory is
+    surfaced back into every session.
 
-Storage:
-- One MASTER index workbook (brief note + path to detail file) = fast scan.
-- Per-zone workbooks hold concise knowledge (user, project, pref, task, ...).
-Runs ALONGSIDE built-in MEMORY.md/USER.md (built-in = fast cache, excel_line =
-durable human-auditable store). MEMORY.md writes are mirrored via on_memory_write.
+DESIGN (agent-driven, not turn-driven)
+    - The agent itself decides WHEN to persist. After producing an output it deems
+      worth keeping, it calls the excel_line `add` tool with the session id and the
+      sequence numbers of the input/output to log (0 = omit that side).
+    - Direct-store mode: when the agent passes explicit zone + brief/content, the
+      record is written straight to the store with NO LLM dependency (the durable
+      path that behaves like built-in memory).
+    - The sub-agent (worker.py) drains the log folder continuously for lazy logs.
 
-Config (under plugins.excel_line in config.yaml):
-  root:       directory for the workbooks (default $HERMES_HOME/excel_line)
-  log_dir:    shared folder where log files for the indexer live (default root/logs)
-  free_model: model id for the classifier (default gemini-3.5-flash-lite)
+RELATIONSHIP TO BUILT-IN MEMORY
+    Runs ALONGSIDE built-in MEMORY.md/USER.md (built-in = fast cache, excel_line =
+    durable human-auditable store). Built-in MEMORY.md writes are mirrored via
+    on_memory_write.
+
+CONFIG (plugins.excel_line in config.yaml)
+    root:       directory for the workbooks (default $HERMES_HOME/excel_line)
+    log_dir:    shared folder where log files for the indexer live (default root/logs)
+    free_model: model id for the classifier (default gemini-3.5-flash-lite)
 """
 
 from __future__ import annotations

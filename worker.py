@@ -1,14 +1,19 @@
-"""Sub-agent worker for excel_line.
+"""worker.py — background indexer (sub-agent) for the excel_line memory provider.
 
-Reads the shared agent I/O log folder, uses a free LLM model to classify each
-entry into a zone and to distil a concise knowledge note, then writes:
-  - a brief row into the master index workbook
-  - the concise knowledge into the matching zone workbook
+INTRODUCTION
+    This module turns raw agent I/O logs into structured memory. It is the
+    "lazy writer" that runs when the agent does NOT call excel_line add directly:
+    it reads the shared log folder, asks a free LLM model to classify each entry
+    into a zone and distil a concise note, then persists the result via store.py.
+    It is intentionally free of agent-runtime imports so it can run as an
+    independent subprocess spawned by the provider (on_session_end hook, cron,
+    or `hermes chat -q`).
 
-This module is intentionally free of agent-runtime imports so it can run as an
-independent subprocess spawned by the provider's on_session_end hook (or by a
-cron job / `hermes chat -q`). It talks to the LLM via the Hermes provider
-config already present in the environment.
+FAILURE POLICY (no silent data loss)
+    - If classification fails, the raw text is stored as a backup into the
+      `knowledge` zone (tag `auto-backup`) instead of emitting an empty record.
+    - If storing fails, the log file is KEPT (renamed back) so it is retried,
+      never deleted.
 """
 
 from __future__ import annotations

@@ -1,16 +1,21 @@
-"""Self-QA for the excel_line memory provider.
+"""qa_excel_line.py — quick smoke test for the excel_line memory provider.
 
-Run AFTER Hermes has reloaded the plugin (restart Hermes, or it picks up the
-edited __init__.py / worker.py on next launch). Verifies the three things that
-must work for excel_line to behave like built-in memory:
+INTRODUCTION
+    A standalone, dependency-light check you run AFTER Hermes has reloaded the
+    plugin (restart Hermes, or it picks up the edited __init__.py / worker.py on
+    next launch). It verifies the three behaviours that make excel_line behave
+    like built-in memory:
 
-  1. Direct-store mode writes immediately (no LLM / indexer dependency).
-  2. search_index / tool `search` retrieves what was stored.
-  3. prefetch() (the auto-retrieve hook) returns the stored brief.
+      1. Direct-store mode writes immediately (no LLM / indexer dependency).
+      2. search_index / the `search` tool retrieves what was stored.
+      3. prefetch() (the auto-retrieve hook) returns the stored brief.
 
-Usage:
-  cd <hermes>/plugins/excel_line
-  uv run --with openpyxl python qa_excel_line.py
+    This is the "fast confidence" script; the full suite lives in
+    tests/test_excel_line.py.
+
+USAGE
+    cd <hermes>/plugins/excel_line
+    uv run --with openpyxl python qa_excel_line.py
 """
 from __future__ import annotations
 import os, sys, tempfile, types, json
