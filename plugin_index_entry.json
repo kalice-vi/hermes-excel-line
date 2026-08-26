@@ -1,11 +1,11 @@
 {
   "name": "excel_line",
   "description": "Excel-backed long-term memory provider for Hermes. Keeps durable, human-auditable knowledge in Excel workbooks alongside built-in MEMORY.md/USER.md; mirrors the built-in write path, injects indexed memories via prefetch() every session, and exposes search/read tools. Direct-store mode writes straight to the store with no LLM dependency; auto-extract falls back to a raw-text backup so memory is never silently lost.",
-  "author": "YOUR_GITHUB_USERNAME",
+  "author": "kalice-vi",
   "tags": ["memory", "excel", "knowledge", "long-term-memory", "provider"],
-  "repo": "YOUR_GITHUB_USERNAME/hermes-excel-line",
-  "ref": "REPLACE_WITH_COMMIT_SHA_OR_TAG",
-  "homepage": "https://github.com/YOUR_GITHUB_USERNAME/hermes-excel-line",
+  "repo": "kalice-vi/hermes-excel-line",
+  "ref": "f68ef7fd85af344eb554c94f6998317a5895bd69",
+  "homepage": "https://github.com/kalice-vi/hermes-excel-line",
   "capabilities": ["memory"],
   "api_version": 1,
   "added_at": "2026-08-26"
