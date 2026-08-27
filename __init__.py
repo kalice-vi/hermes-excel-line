@@ -197,7 +197,8 @@ class ExcelLineProvider(MemoryProvider):
             if not log_dir or not os.path.isdir(log_dir):
                 return
             pending = [n for n in os.listdir(log_dir)
-                       if n.endswith(".jsonl") or n.endswith(".json")]
+                       if (n.endswith(".jsonl") or n.endswith(".json"))
+                       and not n.startswith("session_raw_")]
             if not pending:
                 return
             try:
@@ -340,6 +341,9 @@ class ExcelLineProvider(MemoryProvider):
         except Exception as e:
             logger.debug("excel_line auto_extract failed: %s", e)
             self._save_raw_transcript(messages)
+        # Free per-session transcript buffer so a long-running process with many
+        # sessions does not accumulate unbounded RAM (Gemini round-3 WARN).
+        self._transcripts.pop(self._session_id or "default", None)
 
     def _save_raw_transcript(self, messages) -> None:
         """Persist the raw transcript to the log dir so it can be indexed later
