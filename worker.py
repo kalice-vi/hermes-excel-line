@@ -51,7 +51,14 @@ def _classify(entry: Dict, free_model_fn, zones: List[str]) -> Optional[Dict]:
         if raw.startswith("```"):
             raw = raw.strip("`")
             raw = raw[raw.find("{") : raw.rfind("}") + 1]
-        return json.loads(raw)
+        data = json.loads(raw)
+        # Validate zone membership (ChatGPT review WARN): the LLM may return a
+        # zone that is not in the whitelist; reject it so we fall back to the
+        # raw-text backup instead of creating an arbitrary .xlsx.
+        z = str(data.get("zone", "")).strip().lower()
+        if z and z not in [s.lower() for s in zones]:
+            return None
+        return data
     except Exception:
         return None
 
@@ -94,25 +101,30 @@ def process_logs(log_dir: str, store_root: str, free_model_fn,
         for rec in records:
             cls = _classify(rec, free_model_fn, zones)
             if cls:
-                store.add(
+                rid = store.add(
                     zone=cls.get("zone", "knowledge"),
                     brief=cls.get("brief", "")[:120],
                     content=cls.get("content", "")[:300],
                     title=cls.get("title", "")[:40],
                     tags=cls.get("tags", ""),
                 )
-                count += 1
-                stored_any = True
+                # ChatGPT review B2: add() returns -1 on failure (it swallows
+                # exceptions defensively). Only count it as stored if it really
+                # persisted, otherwise the log would be deleted and memory lost.
+                if rid and rid > 0:
+                    count += 1
+                    stored_any = True
             else:
                 # Classifier unavailable: fall back to a raw-text backup so the
                 # memory is NEVER silently dropped (mirrors provider.on_session_end).
                 raw = " ".join(str(rec.get(k, "")) for k in ("input", "output", "ts"))[:300]
                 if len(raw.strip()) >= 10:
-                    store.add(zone="knowledge", brief=raw[:120],
-                              content=raw[:300], title="auto-backup",
-                              tags="auto-backup,llm-unavailable")
-                    count += 1
-                    stored_any = True
+                    rid = store.add(zone="knowledge", brief=raw[:120],
+                                    content=raw[:300], title="auto-backup",
+                                    tags="auto-backup,llm-unavailable")
+                    if rid and rid > 0:
+                        count += 1
+                        stored_any = True
         # Only delete the log if we actually stored something. If classification
         # failed (e.g. free-model unavailable), KEEP the file (rename .processing
         # back) so it is retried next cycle instead of being silently dropped.

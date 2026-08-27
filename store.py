@@ -105,8 +105,16 @@ class ExcelLineStore:
                 except OSError:
                     pass
                 if time.time() > deadline:
-                    break
+                    # FAIL-CLOSED: do NOT proceed without the lock. Yielding with
+                    # fd=None would let the caller run its critical section
+                    # unsynchronized, causing duplicate IDs / corrupted workbooks
+                    # under cross-process contention (ChatGPT review B1).
+                    raise TimeoutError(
+                        "excel_line: could not acquire cross-process lock within "
+                        f"{timeout}s; aborting to avoid unsynchronized write")
                 time.sleep(0.05)
+        if fd is None:
+            raise TimeoutError("excel_line: cross-process lock not held")
         try:
             yield
         finally:
