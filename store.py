@@ -356,8 +356,10 @@ class ExcelLineStore:
                         try:
                             mwb = load_workbook(self._master)
                             mws = mwb["index"]
+                            master_hit = False
                             for mrow in mws.iter_rows(min_row=2):
                                 if mrow and mrow[0].value == row_id:
+                                    master_hit = True
                                     if brief:
                                         mrow[2].value = self._safe_cell(brief)
                                     if title:
@@ -365,6 +367,16 @@ class ExcelLineStore:
                                     if tags:
                                         mrow[5].value = self._safe_cell(tags)
                                     break
+                            if not master_hit:
+                                # Zone row changed but the master index has no such
+                                # row -> logical inconsistency (ChatGPT r6 BLOCKER):
+                                # refuse the update and roll the zone back.
+                                shutil.copy2(z_snap, zpath)
+                                try:
+                                    os.remove(z_snap)
+                                except OSError:
+                                    pass
+                                return False
                             mwb.save(self._master)
                         except Exception:
                             # B5: master write failed -> roll zone back to snapshot
@@ -385,10 +397,16 @@ class ExcelLineStore:
 
     def _remove_row(self, zone: str, row_id: int) -> bool:
         """Internal: delete one row from a zone workbook and the master index.
-        Does NOT acquire the lock itself (caller must hold it)."""
+        Does NOT acquire the lock itself (caller must hold it).
+        Atomic: snapshots the zone workbook before deleting; if the master index
+        delete fails, the zone row is restored so master/zone stay consistent
+        (ChatGPT round-6 BLOCKER: delete() must roll back on master failure)."""
+        import shutil
         zpath = self.zone_path(zone)
         removed = False
         if os.path.exists(zpath):
+            z_snap = zpath + ".delete.bak"
+            shutil.copy2(zpath, z_snap)
             wb = load_workbook(zpath)
             ws = wb["mem"]
             for i, row in enumerate(ws.iter_rows(min_row=2), start=2):
@@ -402,13 +420,27 @@ class ExcelLineStore:
         # Previously the master was deleted even when the zone row was missing,
         # causing master/zone inconsistency (ChatGPT review B1).
         if removed:
-            mwb = load_workbook(self._master)
-            mws = mwb["index"]
-            for i, mrow in enumerate(mws.iter_rows(min_row=2), start=2):
-                if mrow and mrow[0].value == row_id:
-                    mws.delete_rows(i, 1)
-                    break
-            mwb.save(self._master)
+            try:
+                mwb = load_workbook(self._master)
+                mws = mwb["index"]
+                for i, mrow in enumerate(mws.iter_rows(min_row=2), start=2):
+                    if mrow and mrow[0].value == row_id:
+                        mws.delete_rows(i, 1)
+                        break
+                mwb.save(self._master)
+            except Exception:
+                # Master delete failed -> restore the zone row so master/zone stay
+                # consistent (no split-brain where zone lost but master kept).
+                shutil.copy2(z_snap, zpath)
+                try:
+                    os.remove(z_snap)
+                except OSError:
+                    pass
+                return False
+        try:
+            os.remove(z_snap)
+        except OSError:
+            pass
         return removed
 
     def delete(self, zone: str, row_id: int) -> bool:

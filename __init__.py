@@ -570,6 +570,13 @@ class ExcelLineProvider(MemoryProvider):
                 mid = self._store.add(zone=zone, brief=brief[:120],
                                       content=content[:300], title=title[:40],
                                       tags=tags)
+                if not mid or mid < 0:
+                    # store.add() failed (lock/IO/unknown zone) -> be truthful so the
+                    # agent does not believe the memory is durable (ChatGPT r6 WARN).
+                    return json.dumps({
+                        "status": "error", "id": mid, "zone": zone,
+                        "note": "Store write failed; memory was NOT persisted.",
+                    })
                 return json.dumps({
                     "status": "stored", "id": mid, "zone": zone,
                     "note": "Written directly to the Excel store (no indexer needed).",

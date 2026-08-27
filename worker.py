@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from typing import Dict, List, Optional
 
 from .store import ExcelLineStore, ZONE_DEFAULTS
@@ -144,16 +145,24 @@ def process_logs(log_dir: str, store_root: str, free_model_fn,
             except OSError:
                 pass
         else:
-            # Rewrite ONLY the failed records to a fresh retry log. Use a unique
-            # name (pid + time) so a concurrent worker (or a newly-arrived log)
-            # can never overwrite this file (ChatGPT round-4 WARN: retry overwrite
-            # race). Malformed records (json parse fail) are kept too so they are
-            # not silently dropped — they get retried next cycle.
-            retry_name = f"retry_{os.getpid()}_{int(time.time()*1000)}.jsonl"
+            # Rewrite ONLY the failed records to a fresh retry log. Use a uuid so
+            # concurrent threads/processes can never overwrite each other's file
+            # (ChatGPT round-6 BLOCKER: pid+ts collides across same-PID threads).
+            # Malformed records (json parse fail) are kept too so they are not
+            # silently dropped — they get retried next cycle.
+            # If the retry file cannot be written, we MUST NOT delete tmp_path,
+            # otherwise the unpersisted records are stranded/lost (ChatGPT r6 BLOCKER).
+            retry_name = f"retry_{uuid.uuid4().hex}.jsonl"
             try:
                 with open(os.path.join(log_dir, retry_name), "w", encoding="utf-8") as rf:
                     for rec in failed_records:
                         rf.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            except OSError:
+                # Retry log write failed: keep the original .processing file so the
+                # records survive and are retried on the next index cycle. Do NOT
+                # remove tmp_path here.
+                return count
+            try:
                 os.remove(tmp_path)
             except OSError:
                 pass
@@ -202,29 +211,33 @@ def index_while_logs_present(log_dir: str, store_root: str, free_model_fn,
 
 
 def _read_records(path: str) -> List[Dict]:
+    """Read a log file into records.
+
+    File-level read/parse failures are RAISED (not swallowed) so the caller's
+    "rename to .processing then delete on success" logic never deletes a file it
+    could not read — that would be silent data loss (ChatGPT round-6 BLOCKER).
+    Only individual malformed *lines* are tolerated (kept as _malformed records
+    for retry)."""
     out: List[Dict] = []
-    try:
-        # JSONL (or the .processing temp the indexer renames files to) is read
-        # line-by-line. A plain .json file is parsed as a single JSON array/object.
-        if path.endswith(".jsonl") or path.endswith(".processing"):
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        try:
-                            out.append(json.loads(line))
-                        except Exception:
-                            # Malformed line: keep it as a raw record so the worker
-                            # can retry / back it up instead of silently dropping it
-                            # (ChatGPT round-4 WARN: malformed JSON must not vanish).
-                            out.append({"_raw": line, "_malformed": True})
-        elif path.endswith(".json"):
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                out.extend(data)
-            elif isinstance(data, dict):
-                out.append(data)
-    except Exception:
-        pass
+    # JSONL (or the .processing temp the indexer renames files to) is read
+    # line-by-line. A plain .json file is parsed as a single JSON array/object.
+    if path.endswith(".jsonl") or path.endswith(".processing"):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        out.append(json.loads(line))
+                    except Exception:
+                        # Malformed line: keep it as a raw record so the worker
+                        # can retry / back it up instead of silently dropping it
+                        # (ChatGPT round-4 WARN: malformed JSON must not vanish).
+                        out.append({"_raw": line, "_malformed": True})
+    elif path.endswith(".json"):
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)  # file-level parse error propagates (not swallowed)
+        if isinstance(data, list):
+            out.extend(data)
+        elif isinstance(data, dict):
+            out.append(data)
     return out
