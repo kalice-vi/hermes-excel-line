@@ -324,6 +324,22 @@ class ExcelLineStore:
                     zpath = self.zone_path(zone)
                     if not os.path.exists(zpath):
                         return False
+                    # B2 (r7): before mutating the zone, verify the master index
+                    # actually has this row for EVERY update (content-only too),
+                    # not just when brief/title/tags are supplied. If the master
+                    # row is missing the 1-master/1-zone invariant would break —
+                    # refuse the update rather than leaving a zone-only row.
+                    master_has_row = False
+                    try:
+                        mwb0 = load_workbook(self._master)
+                        for mrow in mwb0["index"].iter_rows(min_row=2):
+                            if mrow and mrow[0].value == row_id:
+                                master_has_row = True
+                                break
+                    except Exception:
+                        master_has_row = False
+                    if not master_has_row:
+                        return False
                     # Snapshot zone bytes for rollback if the master write fails
                     # (B5: keep zone and master consistent — no split-brain).
                     import shutil
@@ -399,26 +415,39 @@ class ExcelLineStore:
         """Internal: delete one row from a zone workbook and the master index.
         Does NOT acquire the lock itself (caller must hold it).
         Atomic: snapshots the zone workbook before deleting; if the master index
-        delete fails, the zone row is restored so master/zone stay consistent
-        (ChatGPT round-6 BLOCKER: delete() must roll back on master failure)."""
+        row is missing or its delete fails, the zone row is restored so
+        master/zone stay consistent (ChatGPT round-6/7 BLOCKER: delete() must
+        roll back when the master row is missing, not only when the master op throws)."""
         import shutil
         zpath = self.zone_path(zone)
-        removed = False
-        if os.path.exists(zpath):
-            z_snap = zpath + ".delete.bak"
-            shutil.copy2(zpath, z_snap)
-            wb = load_workbook(zpath)
-            ws = wb["mem"]
-            for i, row in enumerate(ws.iter_rows(min_row=2), start=2):
-                if row and row[0].value == row_id:
-                    ws.delete_rows(i, 1)
-                    removed = True
+        if not os.path.exists(zpath):
+            return False
+        # B1 (r7): before touching the zone, verify the master index actually has
+        # this row. If the master row is missing, deleting only the zone would
+        # break the 1-master/1-zone invariant — refuse and report no-op.
+        master_has_row = False
+        try:
+            mwb0 = load_workbook(self._master)
+            for mrow in mwb0["index"].iter_rows(min_row=2):
+                if mrow and mrow[0].value == row_id:
+                    master_has_row = True
                     break
-            if removed:
-                wb.save(zpath)
-        # Only remove the master index row if the zone row was actually removed.
-        # Previously the master was deleted even when the zone row was missing,
-        # causing master/zone inconsistency (ChatGPT review B1).
+        except Exception:
+            master_has_row = False
+        if not master_has_row:
+            return False
+        removed = False
+        z_snap = zpath + ".delete.bak"
+        shutil.copy2(zpath, z_snap)
+        wb = load_workbook(zpath)
+        ws = wb["mem"]
+        for i, row in enumerate(ws.iter_rows(min_row=2), start=2):
+            if row and row[0].value == row_id:
+                ws.delete_rows(i, 1)
+                removed = True
+                break
+        if removed:
+            wb.save(zpath)
         if removed:
             try:
                 mwb = load_workbook(self._master)
@@ -429,14 +458,17 @@ class ExcelLineStore:
                         break
                 mwb.save(self._master)
             except Exception:
-                # Master delete failed -> restore the zone row so master/zone stay
-                # consistent (no split-brain where zone lost but master kept).
                 shutil.copy2(z_snap, zpath)
                 try:
                     os.remove(z_snap)
                 except OSError:
                     pass
                 return False
+        try:
+            os.remove(z_snap)
+        except OSError:
+            pass
+        return removed
         try:
             os.remove(z_snap)
         except OSError:

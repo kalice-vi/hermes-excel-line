@@ -92,7 +92,11 @@ def process_logs(log_dir: str, store_root: str, free_model_fn,
             continue
         path = os.path.join(log_dir, name)
         # Atomic take: rename away so concurrent appends go to a fresh file.
-        tmp_path = path + ".processing"
+        # Preserve the original extension in the .processing name so _read_records
+        # can tell a JSON-array/.json file from line-delimited JSONL after rename
+        # (ChatGPT r7 BLOCKER B3: .json must not be parsed as JSONL post-rename).
+        ext = ".jsonl" if name.endswith(".jsonl") else ".json"
+        tmp_path = path[: -len(ext)] + ext + ".processing"
         try:
             os.replace(path, tmp_path)
         except OSError:
@@ -219,9 +223,9 @@ def _read_records(path: str) -> List[Dict]:
     Only individual malformed *lines* are tolerated (kept as _malformed records
     for retry)."""
     out: List[Dict] = []
-    # JSONL (or the .processing temp the indexer renames files to) is read
-    # line-by-line. A plain .json file is parsed as a single JSON array/object.
-    if path.endswith(".jsonl") or path.endswith(".processing"):
+    # JSONL (or the .jsonl.processing temp the indexer renames files to —
+    # extension preserved so .json parses as array/object, not JSONL).
+    if path.endswith(".jsonl") or path.endswith(".jsonl.processing"):
         with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -233,7 +237,7 @@ def _read_records(path: str) -> List[Dict]:
                         # can retry / back it up instead of silently dropping it
                         # (ChatGPT round-4 WARN: malformed JSON must not vanish).
                         out.append({"_raw": line, "_malformed": True})
-    elif path.endswith(".json"):
+    elif path.endswith(".json") or path.endswith(".json.processing"):
         with open(path, encoding="utf-8") as f:
             data = json.load(f)  # file-level parse error propagates (not swallowed)
         if isinstance(data, list):
