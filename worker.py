@@ -144,8 +144,14 @@ def process_logs(log_dir: str, store_root: str, free_model_fn,
             except OSError:
                 pass
         else:
+            # Rewrite ONLY the failed records to a fresh retry log. Use a unique
+            # name (pid + time) so a concurrent worker (or a newly-arrived log)
+            # can never overwrite this file (ChatGPT round-4 WARN: retry overwrite
+            # race). Malformed records (json parse fail) are kept too so they are
+            # not silently dropped — they get retried next cycle.
+            retry_name = f"retry_{os.getpid()}_{int(time.time()*1000)}.jsonl"
             try:
-                with open(path, "w", encoding="utf-8") as rf:
+                with open(os.path.join(log_dir, retry_name), "w", encoding="utf-8") as rf:
                     for rec in failed_records:
                         rf.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 os.remove(tmp_path)
@@ -170,12 +176,28 @@ def index_while_logs_present(log_dir: str, store_root: str, free_model_fn,
     total = 0
     # Cap iterations as a safety net against a pathological loop.
     for _ in range(10000):
+        # Count both original logs and retry logs so the loop keeps draining
+        # failed-record retries instead of spinning forever (ChatGPT round-4 WARN).
         remaining = [n for n in os.listdir(log_dir)
                      if n.endswith(".jsonl") or n.endswith(".json")]
+        # Never index raw-transcript backups (different schema) — they are
+        # intentionally skipped by process_logs, so exclude them from the loop
+        # guard too or the loop would never see "empty".
+        remaining = [n for n in remaining if not n.startswith("session_raw_")]
         if not remaining:
             break
+        before = len(remaining)
         stored = process_logs(log_dir, store_root, free_model_fn, zones, store)
         total += stored
+        # If a full pass stored nothing AND left the same number of files, the
+        # remaining logs are persistently failing (e.g. store unavailable). Stop
+        # to avoid a 10k-iteration tight spin; they will be retried next cycle.
+        after = len([n for n in os.listdir(log_dir)
+                     if (n.endswith(".jsonl") or n.endswith(".json"))
+                     and not n.startswith("session_raw_")])
+        if stored == 0 and after >= before:
+            break
+        time.sleep(0.1)  # tiny backoff so a stuck folder does not burn CPU
     return total
 
 
@@ -192,7 +214,10 @@ def _read_records(path: str) -> List[Dict]:
                         try:
                             out.append(json.loads(line))
                         except Exception:
-                            pass
+                            # Malformed line: keep it as a raw record so the worker
+                            # can retry / back it up instead of silently dropping it
+                            # (ChatGPT round-4 WARN: malformed JSON must not vanish).
+                            out.append({"_raw": line, "_malformed": True})
         elif path.endswith(".json"):
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)

@@ -419,9 +419,10 @@ class ExcelLineProvider(MemoryProvider):
             # the Excel store (this IS the sub-agent's write pass). No log file
             # needed, so nothing to delete later.
             try:
-                self._store.add(zone=zone, brief=brief, content=content,
-                                title=brief[:40], tags=tags or "auto-extract")
-                stored += 1
+                rid = self._store.add(zone=zone, brief=brief, content=content,
+                                     title=brief[:40], tags=tags or "auto-extract")
+                if rid and rid > 0:
+                    stored += 1
             except Exception as e:
                 logger.debug("excel_line auto_extract store failed: %s", e)
         return stored
@@ -437,10 +438,11 @@ class ExcelLineProvider(MemoryProvider):
             if len(text) < 10:
                 continue
             try:
-                self._store.add(zone="knowledge", brief=text[:120],
-                                content=text[:300], title=text[:40],
-                                tags="auto-backup")
-                stored += 1
+                rid = self._store.add(zone="knowledge", brief=text[:120],
+                                     content=text[:300], title=text[:40],
+                                     tags="auto-backup")
+                if rid and rid > 0:
+                    stored += 1
             except Exception as e:
                 logger.debug("excel_line fallback store failed: %s", e)
         return stored

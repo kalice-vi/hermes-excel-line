@@ -145,11 +145,13 @@ def test_worker_no_drop_on_fail():
         f.write(json.dumps({"session": "s", "input": "x long input text", "output": "y", "ts": "t"}) + "\n")
     stored = worker.process_logs(logd, root, bad_model, store=store)
     check("worker stores 0 on total fail", stored == 0)
-    check("worker KEEPS log on fail (no silent drop)", os.path.exists(log),
-          "log missing -> data lost")
-    # The kept log must still contain the original record for retry.
-    kept = open(log, encoding="utf-8").read()
-    check("kept log retains record for retry", "long input text" in kept)
+    # Failed records are rewritten to a unique retry_*.jsonl (never the original
+    # name, so a concurrent worker cannot overwrite it). Log must persist.
+    retries = [n for n in os.listdir(logd) if n.startswith("retry_")]
+    check("worker writes retry log on fail (no silent drop)", len(retries) == 1,
+          f"no retry log -> data lost; files={os.listdir(logd)}")
+    kept = open(os.path.join(logd, retries[0]), encoding="utf-8").read()
+    check("retry log retains record for retry", "long input text" in kept)
 
 
 def test_worker_fallback_raw_store():
