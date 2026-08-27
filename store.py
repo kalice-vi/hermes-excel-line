@@ -125,6 +125,18 @@ class ExcelLineStore:
 
     # -- master ------------------------------------------------------------
 
+    # -- formula-injection safety -----------------------------------------
+    @staticmethod
+    def _safe_cell(value: str) -> str:
+        """Prevent Excel formula injection: a cell whose text starts with
+        = + - @ is interpreted as a formula when the workbook is opened in
+        Excel (and can trigger DDE/hyperlink command execution). Prefix such
+        values with an apostrophe so Excel treats them as literal text."""
+        s = "" if value is None else str(value)
+        if s and s[0] in "=+-@\t\r":
+            return "'" + s
+        return s
+
     def _ensure_master(self):
         if not os.path.exists(self._master):
             wb = Workbook()
@@ -179,12 +191,14 @@ class ExcelLineStore:
                         wb = load_workbook(zpath)
                         ws = wb["mem"]
                     zid = ws.max_row  # 1-based; row 1 is header
-                    ws.append([zid, title or brief[:40], content, tags, now, now])
+                    ws.append([zid, self._safe_cell(title or brief[:40]),
+                               self._safe_cell(content), self._safe_cell(tags), now, now])
                     wb.save(zpath)
                     # write master index row
                     mwb = load_workbook(self._master)
                     mws = mwb["index"]
-                    mws.append([mid, zone, brief, title, zpath, tags, now, now])
+                    mws.append([mid, zone, self._safe_cell(brief),
+                                self._safe_cell(title), zpath, self._safe_cell(tags), now, now])
                     mwb.save(self._master)
                     return mid
         except Exception as e:  # pragma: no cover - defensive

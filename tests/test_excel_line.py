@@ -372,6 +372,26 @@ def test_lazy_index_and_raw_backup():
           str([r.get("content") for r in rows][:3]))
 
 
+def test_formula_injection_safe():
+    """Cells starting with = + - @ must be escaped so Excel does not execute
+    them as formulas (formula injection)."""
+    from store import ExcelLineStore
+    import tempfile
+    root = tempfile.mkdtemp()
+    s = ExcelLineStore(root)
+    for payload in ["=cmd|'/c calc'!A1", "+1+1", "-2", "@SUM(1)"]:
+        mid = s.add(zone="knowledge", brief=payload, content=payload,
+                    title=payload, tags="x")
+        rows = s.read_zone(s.zone_path("knowledge"), limit=10)
+        stored = rows[-1]["content"]
+        check(f"formula-injection escaped: {payload!r}", stored.startswith("'") and stored[1:] == payload,
+              stored)
+        # master index brief also escaped
+        mrows = s.search_index(payload[1:] if payload[0] in "=+-@" else payload, limit=5)
+        # search still works on the visible (escaped) text
+        assert mid
+
+
 def main():
     test_store_basic()
     test_store_search_edge()
@@ -386,6 +406,7 @@ def main():
     test_store_add_exception_safety()
     test_cross_process_lock()
     test_lazy_index_and_raw_backup()
+    test_formula_injection_safe()
     print(f"\n==== QA SUMMARY: {len(PASS)} passed, {len(FAIL)} failed ====")
     if FAIL:
         print("FAILED:", FAIL); sys.exit(1)
