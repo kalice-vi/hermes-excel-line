@@ -113,8 +113,21 @@ class ExcelLineStore:
             if fd is not None:
                 try:
                     os.close(fd)
-                    os.remove(self._lockfile)
                 except OSError:
+                    pass
+                # Only remove the lock file if it is STILL ours. A concurrent
+                # process may have taken over the lock (and rewritten the file
+                # with its own pid) while we were inside `yield`, so blindly
+                # os.remove() here would delete the *other* process's lock and
+                # invalidate their mutual exclusion (Gemini review BLOCKER-02).
+                try:
+                    with open(self._lockfile, "r") as lf:
+                        owner = lf.read().split(":", 1)[0].strip()
+                    if owner == str(os.getpid()):
+                        os.remove(self._lockfile)
+                except (OSError, ValueError):
+                    # File gone or unreadable — another process already cleared
+                    # it; nothing to do.
                     pass
 
     # -- paths -------------------------------------------------------------

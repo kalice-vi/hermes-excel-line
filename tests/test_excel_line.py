@@ -182,6 +182,27 @@ def test_worker_store_on_success():
     check("worker deletes log on success", not os.path.exists(log))
 
 
+def test_worker_skips_raw_transcript_backups():
+    """BLOCKER-01: worker must NOT index session_raw_*.jsonl backups written by
+    the provider — those are raw transcripts, not agent I/O logs. Indexing them
+    would duplicate memory and risk a rename-loop on read failure."""
+    worker = _load_worker()
+    from store import ExcelLineStore
+    root = tempfile.mkdtemp(); logd = tempfile.mkdtemp()
+    store = ExcelLineStore(root)
+    before = store.count()
+    # A raw-transcript backup file in the same log_dir.
+    raw = os.path.join(logd, "session_raw_default_20260101.jsonl")
+    with open(raw, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"session": "s", "input": "user said hi",
+                            "output": "agent replied", "ts": "t"}) + "\n")
+    # No real turn logs present -> worker should skip the raw backup and store 0.
+    stored = worker.process_logs(logd, root, lambda p: "not json", store=store)
+    check("worker skips session_raw_ backups", stored == 0)
+    check("worker leaves raw backup untouched", os.path.exists(raw))
+    check("worker did not index raw backup", store.count() == before)
+
+
 def test_provider_direct_store():
     xl = _load_plugin()
     from store import ExcelLineStore
@@ -405,6 +426,7 @@ def main():
     test_worker_no_drop_on_fail()
     test_worker_fallback_raw_store()
     test_worker_store_on_success()
+    test_worker_skips_raw_transcript_backups()
     test_provider_direct_store()
     test_provider_direct_store_no_llm_dep()
     test_provider_seq_mode_still_logs()

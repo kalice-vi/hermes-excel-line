@@ -74,6 +74,12 @@ def process_logs(log_dir: str, store_root: str, free_model_fn,
 
     count = 0
     for name in sorted(os.listdir(log_dir)):
+        # Skip raw-transcript backups written by provider._save_raw_transcript.
+        # They live in the same log_dir but use a different schema and must NOT
+        # be re-indexed as if they were agent I/O logs (would duplicate memory
+        # and could loop if a read fails). Only process turn logs.
+        if name.startswith("session_raw_"):
+            continue
         if not name.endswith(".jsonl") and not name.endswith(".json"):
             continue
         path = os.path.join(log_dir, name)
