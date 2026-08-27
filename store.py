@@ -318,6 +318,8 @@ class ExcelLineStore:
         Returns True if something was changed. Wrapped in try/except so a failure
         is reported, not raised."""
         zone = zone or "knowledge"
+        if zone not in ZONE_DEFAULTS:  # W1 (r8): enforce whitelist at public boundary
+            return False
         try:
             with self._cross_process_lock():
                 with self._lock:
@@ -479,6 +481,8 @@ class ExcelLineStore:
         """Delete a memory row from a zone workbook + master index. Returns True
         if a row was removed."""
         zone = zone or "knowledge"
+        if zone not in ZONE_DEFAULTS:  # W1 (r8): enforce whitelist at public boundary
+            return False
         try:
             with self._cross_process_lock():
                 with self._lock:

@@ -129,6 +129,12 @@ def _log_dir(cfg: dict, root: str) -> str:
     )
 
 
+def _safe_sid(sid: str) -> str:
+    """Sanitize a session id for use in a filename. Strips path separators on
+    both POSIX and Windows (W7, r8: a sid like '..\\foo' must not escape log_dir)."""
+    return sid.replace("/", "_").replace("\\", "_").replace("..", "_").strip() or "default"
+
+
 # ---------------------------------------------------------------------------
 # Provider
 # ---------------------------------------------------------------------------
@@ -361,7 +367,7 @@ class ExcelLineProvider(MemoryProvider):
             if not turns:
                 return
             stamp = _t.strftime("%Y%m%d-%H%M%S") + f"{int(_t.time()*1000)%1000:03d}"
-            path = os.path.join(log_dir, f"session_raw_{sid}_{stamp}.jsonl")
+            path = os.path.join(log_dir, f"session_raw_{_safe_sid(sid)}_{stamp}.jsonl")
             with open(path, "w", encoding="utf-8") as f:
                 for line in turns:
                     # Schema matches the standard log format worker.py consumes
@@ -608,7 +614,7 @@ class ExcelLineProvider(MemoryProvider):
         # Write a log file for the indexer (filename encodes the source so it is
         # unique and never collides with another pending log).
         stamp = time.strftime("%Y%m%d-%H%M%S") + f"{int(time.time()*1000)%1000:03d}"
-        log_name = f"{sid.replace('/', '_')}_i{in_seq}_o{out_seq}_{stamp}.jsonl"
+        log_name = f"{_safe_sid(sid)}_i{in_seq}_o{out_seq}_{stamp}.jsonl"
         log_path = os.path.join(self._log_dir, log_name)
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(json.dumps({

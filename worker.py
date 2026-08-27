@@ -101,10 +101,29 @@ def process_logs(log_dir: str, store_root: str, free_model_fn,
             os.replace(path, tmp_path)
         except OSError:
             continue
-        records = _read_records(tmp_path)
+        try:
+            records = _read_records(tmp_path)
+        except Exception:
+            # B2 (r8): file-level parse/read error must NOT strand the .processing
+            # file forever (scanner only looks for .json/.jsonl). Rename it back to
+            # its original name so the next index cycle retries it instead of
+            # losing it. This is the recovery path for fix (27).
+            try:
+                os.replace(tmp_path, path)
+            except OSError:
+                pass
+            continue
         stored_any = False
         failed_records = []  # records that did NOT persist (for safe retry)
         for rec in records:
+            # B3 (r8): malformed JSON lines are kept as {"_raw", "_malformed":True}
+            # by _read_records. They can never be classified or backed up (no
+            # input/output/ts), so they would otherwise be silently deleted. Keep
+            # them in failed_records so they are rewritten to a retry log instead
+            # of dropped — the operator can inspect/repair them later.
+            if rec.get("_malformed"):
+                failed_records.append(rec)
+                continue
             cls = _classify(rec, free_model_fn, zones)
             if cls:
                 rid = store.add(
