@@ -212,7 +212,11 @@ class ExcelLineProvider(MemoryProvider):
         if not self._store or not query:
             return ""
         try:
-            self._drain_pending_logs()
+            # NOTE: we intentionally do NOT call _drain_pending_logs() here.
+            # That would run a synchronous LLM call on every user turn and block
+            # the agent's response (Gemini review #4). Lazy indexing is instead
+            # driven by the background indexer (_schedule_index / on_session_end),
+            # so prefetch stays cheap and never calls the model.
             hits = self._store.search_index(query, limit=8)
             if not hits:
                 return ""
@@ -348,11 +352,19 @@ class ExcelLineProvider(MemoryProvider):
                          for t in self._transcripts.get(sid, []) if t.get("input") or t.get("output")]
             if not turns:
                 return
-            stamp = _t.strftime("%Y%m%d-%H%M%S")
+            stamp = _t.strftime("%Y%m%d-%H%M%S") + f"{int(_t.time()*1000)%1000:03d}"
             path = os.path.join(log_dir, f"session_raw_{sid}_{stamp}.jsonl")
             with open(path, "w", encoding="utf-8") as f:
                 for line in turns:
-                    f.write(_json.dumps({"session": sid, "raw": line, "ts": stamp}) + "\n")
+                    # Schema matches the standard log format worker.py consumes
+                    # (session, input, output, ts) so the lazy indexer can read it.
+                    if line.startswith("User:") or line.startswith("Assistant:"):
+                        role, _, txt = line.partition(":")
+                        f.write(_json.dumps({"session": sid, "input": txt.strip() if role == "User" else "",
+                                             "output": txt.strip() if role == "Assistant" else "",
+                                             "ts": stamp}) + "\n")
+                    else:
+                        f.write(_json.dumps({"session": sid, "input": line, "output": "", "ts": stamp}) + "\n")
         except Exception as e:
             logger.debug("excel_line raw transcript backup failed: %s", e)
 
@@ -451,6 +463,16 @@ class ExcelLineProvider(MemoryProvider):
             data = json.loads(raw)
             return data if isinstance(data, list) else []
         except Exception:
+            # Last-resort: extract the first [...] JSON array even if the model
+            # wrapped it in prose or used wrong fences (Gemini review #8).
+            import re
+            m = re.search(r"\[.*\]", raw, re.DOTALL)
+            if m:
+                try:
+                    data = json.loads(m.group(0))
+                    return data if isinstance(data, list) else []
+                except Exception:
+                    pass
             return []
 
     def _schedule_index(self) -> None:
@@ -543,7 +565,7 @@ class ExcelLineProvider(MemoryProvider):
 
         # Write a log file for the indexer (filename encodes the source so it is
         # unique and never collides with another pending log).
-        stamp = time.strftime("%Y%m%d-%H%M%S")
+        stamp = time.strftime("%Y%m%d-%H%M%S") + f"{int(time.time()*1000)%1000:03d}"
         log_name = f"{sid.replace('/', '_')}_i{in_seq}_o{out_seq}_{stamp}.jsonl"
         log_path = os.path.join(self._log_dir, log_name)
         with open(log_path, "w", encoding="utf-8") as f:

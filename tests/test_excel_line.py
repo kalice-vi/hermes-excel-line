@@ -339,7 +339,8 @@ def test_lazy_index_and_raw_backup():
     p._root = root; p._log_dir = logd
     p._store = ExcelLineStore(root); p._session_id = "qa"
 
-    # 1) seed a seq-log; prefetch should drain it then find the memory
+    # 1) seed a seq-log; the BACKGROUND indexer (not prefetch) drains it.
+    #    prefetch() must stay cheap (no synchronous LLM call) — it only searches.
     import os as _os
     log = _os.path.join(logd, "sess_i1_o1_lazy.jsonl")
     with open(log, "w", encoding="utf-8") as f:
@@ -351,9 +352,14 @@ def test_lazy_index_and_raw_backup():
     _sys.modules["excel_line_plugin"]._ask_free_model = lambda p, model="x": json.dumps(
         {"zone": "knowledge", "brief": "Honda purchase noted",
          "title": "honda", "content": "user bought Honda", "tags": "k"})
+    # prefetch should NOT drain (Gemini review #4) — it only searches existing index.
+    res0 = p.prefetch("Honda", session_id="qa")
+    check("prefetch does not drain log (stays cheap)", _os.path.exists(log))
+    # background indexer drains it instead.
+    p._run_indexer()
+    check("lazy index removed the log after background drain", not _os.path.exists(log))
     res = p.prefetch("Honda", session_id="qa")
-    check("lazy index + prefetch finds drained log", "Honda" in res, res[:120])
-    check("lazy index removed the log", not _os.path.exists(log))
+    check("prefetch finds indexed memory after background drain", "Honda" in res, res[:120])
 
     # 2) on_session_end must not lose data when the LLM fails to classify:
     #    _auto_extract's _fallback_store persists raw turns into the store.
