@@ -98,6 +98,7 @@ def process_logs(log_dir: str, store_root: str, free_model_fn,
             continue
         records = _read_records(tmp_path)
         stored_any = False
+        failed_records = []  # records that did NOT persist (for safe retry)
         for rec in records:
             cls = _classify(rec, free_model_fn, zones)
             if cls:
@@ -109,11 +110,14 @@ def process_logs(log_dir: str, store_root: str, free_model_fn,
                     tags=cls.get("tags", ""),
                 )
                 # ChatGPT review B2: add() returns -1 on failure (it swallows
-                # exceptions defensively). Only count it as stored if it really
-                # persisted, otherwise the log would be deleted and memory lost.
+                # exceptions defensively). Track success vs failure so we never
+                # delete a log that still has unpersisted records (mixed-success
+                # case: A persists, B fails -> B must be retried, not dropped).
                 if rid and rid > 0:
                     count += 1
                     stored_any = True
+                else:
+                    failed_records.append(rec)
             else:
                 # Classifier unavailable: fall back to a raw-text backup so the
                 # memory is NEVER silently dropped (mirrors provider.on_session_end).
@@ -125,17 +129,26 @@ def process_logs(log_dir: str, store_root: str, free_model_fn,
                     if rid and rid > 0:
                         count += 1
                         stored_any = True
-        # Only delete the log if we actually stored something. If classification
-        # failed (e.g. free-model unavailable), KEEP the file (rename .processing
-        # back) so it is retried next cycle instead of being silently dropped.
-        if stored_any:
+                    else:
+                        failed_records.append(rec)
+                else:
+                    # too short to be meaningful -> skip but do not retry
+                    pass
+        # Disposition:
+        # - All records persisted  -> safe to delete the log.
+        # - Some records failed    -> rewrite ONLY the failed ones back to a fresh
+        #   log so they are retried next cycle (never silently dropped).
+        if not failed_records:
             try:
                 os.remove(tmp_path)
             except OSError:
                 pass
         else:
             try:
-                os.replace(tmp_path, path)
+                with open(path, "w", encoding="utf-8") as rf:
+                    for rec in failed_records:
+                        rf.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                os.remove(tmp_path)
             except OSError:
                 pass
     return count

@@ -131,20 +131,25 @@ def _load_worker():
 
 
 def test_worker_no_drop_on_fail():
-    """Classify fails (free_model returns garbage) -> log must be KEPT, not deleted."""
+    """Classify fails AND store.add fails -> failed records must be retried (log kept)."""
     worker = _load_worker()
     from store import ExcelLineStore
     root = tempfile.mkdtemp(); logd = tempfile.mkdtemp()
     store = ExcelLineStore(root)
+    # Force BOTH classify and store.add to fail so the record cannot persist.
     def bad_model(prompt):
         return "not json at all"
+    store.add = lambda *a, **k: -1  # simulate defensive failure
     log = os.path.join(logd, "sess_i1_o1_20260101.jsonl")
     with open(log, "w", encoding="utf-8") as f:
-        f.write(json.dumps({"session": "s", "input": "x", "output": "y", "ts": "t"}) + "\n")
+        f.write(json.dumps({"session": "s", "input": "x long input text", "output": "y", "ts": "t"}) + "\n")
     stored = worker.process_logs(logd, root, bad_model, store=store)
-    check("worker stores 0 on classify fail", stored == 0)
+    check("worker stores 0 on total fail", stored == 0)
     check("worker KEEPS log on fail (no silent drop)", os.path.exists(log),
           "log missing -> data lost")
+    # The kept log must still contain the original record for retry.
+    kept = open(log, encoding="utf-8").read()
+    check("kept log retains record for retry", "long input text" in kept)
 
 
 def test_worker_fallback_raw_store():
