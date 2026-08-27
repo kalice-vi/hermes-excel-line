@@ -173,9 +173,20 @@ class ExcelLineStore:
                 return 0
 
     def _new_id(self) -> int:
-        with self._lock:
-            self._seq += 1
-            return self._seq
+        # Compute the next id from the persisted master index (not an in-memory
+        # counter) so that concurrent ExcelLineStore instances in different
+        # processes never hand out the same id (ChatGPT review B2). The caller
+        # must already hold self._lock (and usually the cross-process lock too).
+        max_id = 0
+        try:
+            wb = load_workbook(self._master, read_only=True)
+            ws = wb["index"]
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if row and isinstance(row[0], int):
+                    max_id = max(max_id, row[0])
+        except Exception:
+            max_id = 0
+        return max_id + 1
 
     # -- write -------------------------------------------------------------
 
@@ -203,16 +214,32 @@ class ExcelLineStore:
                     else:
                         wb = load_workbook(zpath)
                         ws = wb["mem"]
-                    zid = ws.max_row  # 1-based; row 1 is header
+                    zid = mid  # CRITICAL: zone row id MUST equal the master id,
+                               # otherwise update/delete/forget (which receive the
+                               # master id from add()) cannot locate the zone row.
                     ws.append([zid, self._safe_cell(title or brief[:40]),
                                self._safe_cell(content), self._safe_cell(tags), now, now])
                     wb.save(zpath)
-                    # write master index row
-                    mwb = load_workbook(self._master)
-                    mws = mwb["index"]
-                    mws.append([mid, zone, self._safe_cell(brief),
-                                self._safe_cell(title), zpath, self._safe_cell(tags), now, now])
-                    mwb.save(self._master)
+                    # write master index row (only after zone committed successfully)
+                    try:
+                        mwb = load_workbook(self._master)
+                        mws = mwb["index"]
+                        mws.append([mid, zone, self._safe_cell(brief),
+                                    self._safe_cell(title), zpath, self._safe_cell(tags), now, now])
+                        mwb.save(self._master)
+                    except Exception:
+                        # Roll back the zone row we just appended so zone and
+                        # master never diverge (ChatGPT review B3: non-atomic add).
+                        # The caller still gets -1 and a logged error.
+                        try:
+                            wb2 = load_workbook(zpath)
+                            ws2 = wb2["mem"]
+                            if ws2.max_row >= 2:
+                                ws2.delete_rows(ws2.max_row, 1)
+                            wb2.save(zpath)
+                        except Exception:
+                            pass
+                        raise
                     return mid
         except Exception as e:  # pragma: no cover - defensive
             import logging
@@ -327,14 +354,17 @@ class ExcelLineStore:
                     break
             if removed:
                 wb.save(zpath)
-        # remove matching master index row
-        mwb = load_workbook(self._master)
-        mws = mwb["index"]
-        for i, mrow in enumerate(mws.iter_rows(min_row=2), start=2):
-            if mrow and mrow[0].value == row_id:
-                mws.delete_rows(i, 1)
-                break
-        mwb.save(self._master)
+        # Only remove the master index row if the zone row was actually removed.
+        # Previously the master was deleted even when the zone row was missing,
+        # causing master/zone inconsistency (ChatGPT review B1).
+        if removed:
+            mwb = load_workbook(self._master)
+            mws = mwb["index"]
+            for i, mrow in enumerate(mws.iter_rows(min_row=2), start=2):
+                if mrow and mrow[0].value == row_id:
+                    mws.delete_rows(i, 1)
+                    break
+            mwb.save(self._master)
         return removed
 
     def delete(self, zone: str, row_id: int) -> bool:
