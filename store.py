@@ -264,6 +264,119 @@ class ExcelLineStore:
                 zones.append(f[:-5])
         return zones
 
+    # -- update / delete / forget (mutable memory) -------------------------
+
+    def update(self, zone: str, row_id: int, brief: str = "", content: str = "",
+               title: str = "", tags: str = "") -> bool:
+        """Edit an existing memory row in a zone workbook + its master index entry.
+        Returns True if something was changed. Wrapped in try/except so a failure
+        is reported, not raised."""
+        zone = zone or "knowledge"
+        try:
+            with self._cross_process_lock():
+                with self._lock:
+                    zpath = self.zone_path(zone)
+                    if not os.path.exists(zpath):
+                        return False
+                    wb = load_workbook(zpath)
+                    ws = wb["mem"]
+                    changed = False
+                    for row in ws.iter_rows(min_row=2):
+                        if row and row[0].value == row_id:
+                            if title:
+                                row[1].value = self._safe_cell(title)
+                            if content:
+                                row[2].value = self._safe_cell(content)
+                            if tags:
+                                row[3].value = self._safe_cell(tags)
+                            changed = True
+                            break
+                    if changed:
+                        wb.save(zpath)
+                    # also update the master index brief/title if present
+                    if brief or title:
+                        mwb = load_workbook(self._master)
+                        mws = mwb["index"]
+                        for mrow in mws.iter_rows(min_row=2):
+                            if mrow and mrow[0].value == row_id:
+                                if brief:
+                                    mrow[2].value = self._safe_cell(brief)
+                                if title:
+                                    mrow[3].value = self._safe_cell(title)
+                                if tags:
+                                    mrow[5].value = self._safe_cell(tags)
+                                break
+                        mwb.save(self._master)
+                    return changed
+        except Exception as e:
+            logging.getLogger(__name__).error("excel_line store.update failed: %s", e)
+            return False
+
+    def _remove_row(self, zone: str, row_id: int) -> bool:
+        """Internal: delete one row from a zone workbook and the master index.
+        Does NOT acquire the lock itself (caller must hold it)."""
+        zpath = self.zone_path(zone)
+        removed = False
+        if os.path.exists(zpath):
+            wb = load_workbook(zpath)
+            ws = wb["mem"]
+            for i, row in enumerate(ws.iter_rows(min_row=2), start=2):
+                if row and row[0].value == row_id:
+                    ws.delete_rows(i, 1)
+                    removed = True
+                    break
+            if removed:
+                wb.save(zpath)
+        # remove matching master index row
+        mwb = load_workbook(self._master)
+        mws = mwb["index"]
+        for i, mrow in enumerate(mws.iter_rows(min_row=2), start=2):
+            if mrow and mrow[0].value == row_id:
+                mws.delete_rows(i, 1)
+                break
+        mwb.save(self._master)
+        return removed
+
+    def delete(self, zone: str, row_id: int) -> bool:
+        """Delete a memory row from a zone workbook + master index. Returns True
+        if a row was removed."""
+        zone = zone or "knowledge"
+        try:
+            with self._cross_process_lock():
+                with self._lock:
+                    return self._remove_row(zone, row_id)
+        except Exception as e:
+            logging.getLogger(__name__).error("excel_line store.delete failed: %s", e)
+            return False
+
+    def forget(self, query: str) -> int:
+        """Delete every memory whose brief/title/tags match `query` (case-insensitive
+        substring). Useful for 'forget everything about X'. Returns count removed."""
+        q = (query or "").lower().strip()
+        if not q:
+            return 0
+        try:
+            with self._cross_process_lock():
+                with self._lock:
+                    removed = 0
+                    # gather ids to delete per zone
+                    wb = load_workbook(self._master, read_only=True)
+                    ws = wb["index"]
+                    targets = []  # (zone, id)
+                    for row in ws.iter_rows(min_row=2, values_only=True):
+                        if not row or row[0] is None:
+                            continue
+                        blob = " ".join(str(x or "") for x in (row[1], row[2], row[3], row[5])).lower()
+                        if q in blob:
+                            targets.append((row[1], row[0]))
+                    for zone, rid in targets:
+                        if self._remove_row(zone, rid):
+                            removed += 1
+                    return removed
+        except Exception as e:
+            logging.getLogger(__name__).error("excel_line store.forget failed: %s", e)
+            return 0
+
     def count(self) -> int:
         try:
             wb = load_workbook(self._master, read_only=True)

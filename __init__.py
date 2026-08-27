@@ -59,6 +59,9 @@ EXCEL_LINE_SCHEMA = {
         "• search — keyword search the master index (fast scan of brief + tags).\n"
         "• read — open a zone file and return its concise knowledge rows.\n"
         "• zones — list existing zone workbooks.\n"
+        "• update — edit an existing memory row (needs row_id + zone; pass brief/content/title/tags to change).\n"
+        "• delete — remove a memory row by row_id + zone.\n"
+        "• forget — delete all memories matching a keyword (e.g. forget 'old project').\n"
         "Use excel_line to recall durable facts, preferences, projects, contacts, and "
         "concise knowledge the user expects you to remember across sessions."
     ),
@@ -67,7 +70,7 @@ EXCEL_LINE_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "search", "read", "zones"],
+                "enum": ["add", "search", "read", "zones", "update", "delete", "forget"],
             },
             "session": {
                 "type": "string",
@@ -91,6 +94,7 @@ EXCEL_LINE_SCHEMA = {
             "title": {"type": "string", "description": "Short title for 'add'."},
             "tags": {"type": "string", "description": "Comma-separated tags."},
             "limit": {"type": "integer", "description": "Max rows (default 10)."},
+            "row_id": {"type": "integer", "description": "Memory row id for 'update'/'delete'."},
         },
         "required": ["action"],
     },
@@ -505,6 +509,31 @@ class ExcelLineProvider(MemoryProvider):
                 return json.dumps({"zone": zone, "rows": rows, "count": len(rows)})
             if action == "zones":
                 return json.dumps({"zones": self._store.list_zones()})
+            if action == "update":
+                zone = (args.get("zone") or "knowledge").strip()
+                rid = int(args.get("row_id", 0) or 0)
+                if rid == 0:
+                    return tool_error("update requires row_id")
+                ok = self._store.update(
+                    zone=zone, row_id=rid,
+                    brief=(args.get("brief") or "").strip()[:120],
+                    content=(args.get("content") or "").strip()[:300],
+                    title=(args.get("title") or "").strip()[:40],
+                    tags=(args.get("tags") or "").strip())
+                return json.dumps({"status": "updated" if ok else "not_found", "id": rid, "zone": zone})
+            if action == "delete":
+                zone = (args.get("zone") or "knowledge").strip()
+                rid = int(args.get("row_id", 0) or 0)
+                if rid == 0:
+                    return tool_error("delete requires row_id")
+                ok = self._store.delete(zone=zone, row_id=rid)
+                return json.dumps({"status": "deleted" if ok else "not_found", "id": rid, "zone": zone})
+            if action == "forget":
+                q = (args.get("query") or "").strip()
+                if not q:
+                    return tool_error("forget requires query")
+                n = self._store.forget(q)
+                return json.dumps({"status": "forgotten", "removed": n, "query": q})
             return tool_error(f"Unknown action: {action}")
         except Exception as exc:
             return tool_error(str(exc))
