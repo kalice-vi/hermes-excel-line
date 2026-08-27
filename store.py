@@ -40,7 +40,7 @@ MASTER_NAME = "excel-line_index.xlsx"
 INDEX_COLS = ["id", "zone", "brief", "title", "path", "tags", "created", "updated"]
 MEM_COLS = ["id", "title", "content", "tags", "created", "updated"]
 
-ZONE_DEFAULTS = ["user", "project", "pref", "task", "knowledge", "contact"]
+ZONE_DEFAULTS = ["user", "project", "pref", "task", "knowledge", "contact", "skill"]
 
 
 def _now() -> str:
@@ -206,6 +206,15 @@ class ExcelLineStore:
         provider — the caller gets -1 and a logged error instead of an exception.
         """
         zone = zone or "knowledge"
+        # W1: enforce zone whitelist at the public store boundary, not only in
+        # the worker classifier — otherwise the agent could create arbitrary
+        # .xlsx zone workbooks via the direct add() API.
+        if zone not in ZONE_DEFAULTS:
+            try:
+                logger.debug("excel_line add rejected unknown zone: %s", zone)
+            except Exception:
+                pass
+            return -1
         try:
             with self._cross_process_lock():
                 with self._lock:
@@ -260,19 +269,20 @@ class ExcelLineStore:
         """Keyword scan over the master index (brief + tags + zone)."""
         q = query.lower()
         hits: List[Dict] = []
-        with self._lock:
-            wb = load_workbook(self._master, read_only=True)
-            ws = wb["index"]
-            for row in ws.iter_rows(min_row=2, values_only=True):
-                if not row or row[0] is None:
-                    continue
-                # Scan zone + brief + title (row[3]) + path + tags.
-                blob = " ".join(str(x or "") for x in (row[1], row[2], row[3], row[4], row[5])).lower()
-                if q in blob:
-                    hits.append({
-                        "id": row[0], "zone": row[1], "brief": row[2],
-                        "title": row[3], "path": row[4], "tags": row[5],
-                    })
+        with self._cross_process_lock():  # B4: reads must also exclude writers
+            with self._lock:
+                wb = load_workbook(self._master, read_only=True)
+                ws = wb["index"]
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    if not row or row[0] is None:
+                        continue
+                    # Scan zone + brief + title (row[3]) + path + tags.
+                    blob = " ".join(str(x or "") for x in (row[1], row[2], row[3], row[4], row[5])).lower()
+                    if q in blob:
+                        hits.append({
+                            "id": row[0], "zone": row[1], "brief": row[2],
+                            "title": row[3], "path": row[4], "tags": row[5],
+                        })
         return hits[:limit]
 
     def read_zone(self, path: str, limit: int = 20) -> List[Dict]:
@@ -280,16 +290,17 @@ class ExcelLineStore:
         if not os.path.exists(path):
             return []
         out: List[Dict] = []
-        with self._lock:
-            wb = load_workbook(path, read_only=True)
-            ws = wb["mem"]
-            for row in ws.iter_rows(min_row=2, values_only=True):
-                if not row or row[0] is None:
-                    continue
-                out.append({
-                    "id": row[0], "title": row[1], "content": row[2],
-                    "tags": row[3], "created": row[4],
-                })
+        with self._cross_process_lock():  # B4: exclude concurrent writers
+            with self._lock:
+                wb = load_workbook(path, read_only=True)
+                ws = wb["mem"]
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    if not row or row[0] is None:
+                        continue
+                    out.append({
+                        "id": row[0], "title": row[1], "content": row[2],
+                        "tags": row[3], "created": row[4],
+                    })
         return out[-limit:]
 
     def list_zones(self) -> List[str]:
@@ -313,6 +324,11 @@ class ExcelLineStore:
                     zpath = self.zone_path(zone)
                     if not os.path.exists(zpath):
                         return False
+                    # Snapshot zone bytes for rollback if the master write fails
+                    # (B5: keep zone and master consistent — no split-brain).
+                    import shutil
+                    z_snap = zpath + ".update.bak"
+                    shutil.copy2(zpath, z_snap)
                     wb = load_workbook(zpath)
                     ws = wb["mem"]
                     changed = False
@@ -326,23 +342,43 @@ class ExcelLineStore:
                                 row[3].value = self._safe_cell(tags)
                             changed = True
                             break
-                    if changed:
-                        wb.save(zpath)
-                    # also update the master index brief/title if present
-                    if brief or title:
-                        mwb = load_workbook(self._master)
-                        mws = mwb["index"]
-                        for mrow in mws.iter_rows(min_row=2):
-                            if mrow and mrow[0].value == row_id:
-                                if brief:
-                                    mrow[2].value = self._safe_cell(brief)
-                                if title:
-                                    mrow[3].value = self._safe_cell(title)
-                                if tags:
-                                    mrow[5].value = self._safe_cell(tags)
-                                break
-                        mwb.save(self._master)
-                    return changed
+                    # W3: if the zone row does not exist, do NOT touch master.
+                    if not changed:
+                        try:
+                            os.remove(z_snap)
+                        except OSError:
+                            pass
+                        return False
+                    wb.save(zpath)
+                    # also update the master index brief/title/tags if present
+                    # (W2: tags-only updates must sync master tags too)
+                    if brief or title or tags:
+                        try:
+                            mwb = load_workbook(self._master)
+                            mws = mwb["index"]
+                            for mrow in mws.iter_rows(min_row=2):
+                                if mrow and mrow[0].value == row_id:
+                                    if brief:
+                                        mrow[2].value = self._safe_cell(brief)
+                                    if title:
+                                        mrow[3].value = self._safe_cell(title)
+                                    if tags:
+                                        mrow[5].value = self._safe_cell(tags)
+                                    break
+                            mwb.save(self._master)
+                        except Exception:
+                            # B5: master write failed -> roll zone back to snapshot
+                            shutil.copy2(z_snap, zpath)
+                            try:
+                                os.remove(z_snap)
+                            except OSError:
+                                pass
+                            return False
+                    try:
+                        os.remove(z_snap)
+                    except OSError:
+                        pass
+                    return True
         except Exception as e:
             logging.getLogger(__name__).error("excel_line store.update failed: %s", e)
             return False
@@ -417,8 +453,9 @@ class ExcelLineStore:
 
     def count(self) -> int:
         try:
-            wb = load_workbook(self._master, read_only=True)
-            return max(0, wb["index"].max_row - 1)
+            with self._cross_process_lock():  # B4: exclude concurrent writers
+                wb = load_workbook(self._master, read_only=True)
+                return max(0, wb["index"].max_row - 1)
         except Exception:
             return 0
 

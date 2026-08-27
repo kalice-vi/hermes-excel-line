@@ -204,9 +204,9 @@ def index_while_logs_present(log_dir: str, store_root: str, free_model_fn,
 def _read_records(path: str) -> List[Dict]:
     out: List[Dict] = []
     try:
-        # Accept both the original .jsonl/.json and the .processing temp
-        # the indexer renames files to before reading.
-        if path.endswith(".jsonl") or path.endswith(".json") or path.endswith(".processing"):
+        # JSONL (or the .processing temp the indexer renames files to) is read
+        # line-by-line. A plain .json file is parsed as a single JSON array/object.
+        if path.endswith(".jsonl") or path.endswith(".processing"):
             with open(path, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
