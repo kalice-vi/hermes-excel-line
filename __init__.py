@@ -536,9 +536,12 @@ class ExcelLineProvider(MemoryProvider):
                     return tool_error(str(e))
             if action == "promote":
                 try:
-                    res = self._store.promote(args.get("branch", "brain.xlsx"),
-                                              int(args.get("row_id", 0)),
-                                              args.get("name", "tool"))
+                    rid = int(args.get("row_id", 0))
+                    br = args.get("branch")
+                    if not br:
+                        f = self._store.find(rid)
+                        br = f["branch"] if f else "brain.xlsx"
+                    res = self._store.promote(br, rid, args.get("name", "tool"))
                     return json.dumps({"status": "promoted", **res})
                 except Exception as e:
                     return tool_error(str(e))
