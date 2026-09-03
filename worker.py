@@ -27,17 +27,27 @@ from typing import Dict, List, Optional
 from .store import ExcelLineStore, ZONE_DEFAULTS
 
 # Prompt for the free LLM: returns JSON only.
-_CLASSIFY_PROMPT = """You are a memory classifier for an AI agent's long-term store.
-Given one agent I/O record (input + output), decide:
-1. zone: one of {zones}
-2. brief: a 1-sentence human-readable summary (max 120 chars, Vietnamese OK)
-3. title: short title (max 40 chars)
-4. content: the concise KEY knowledge to keep (max 300 chars; drop chatter,
-   keep decisions, facts, preferences, how-tos, contacts)
-5. tags: comma-separated keywords
+_CLASSIFY_PROMPT = """You are the memory curator of a hierarchical Excel brain.
+The store is a TREE: every .xlsx file holds AT MOST 10 rows (ID|Title|Content|Tags|Branch|Updated).
+A row whose Branch ends in .xlsx is a NODE pointing to another file; a row whose
+Branch is a non-.xlsx path is a LEAF asset file (must be deepest in the tree);
+a row with empty Branch is a plain memory.
 
-Reply with strict JSON only:
-{{"zone":"...","brief":"...","title":"...","content":"...","tags":"..."}}
+CURRENT TREE (usage per file shown):
+{tree}
+
+Decide what to do with the RECORD below. Rules:
+- Chitchat, transient commands, narration, one-off task orders => {{"action":"none"}}. NEVER store verbatim user messages.
+- If a plain fact FITS an existing branch with room => {{"action":"add","branch":"<file.xlsx>","title":"<=50 chars","content":"<=250 chars, compressed knowledge NOT the raw dialogue","tags":"comma,keywords"}}.
+- Prefer UPDATING/compressing an older memory over creating near-duplicates:
+  {{"action":"merge","branch":"<file>","ids":[..],"title":"gộp","content":"nén các ý","tags":".."}}
+- Branch full (10/10) and the fact is genuinely new => split:
+  {{"action":"child","parent":"<file>","name":"<sub-nhánh>","title":"<=50"}}
+  (the worker will then retry the add inside the new child automatically)
+- Only create LEAF assets when the record references a real file that belongs to a memory.
+Title/Content must be reusable knowledge, compressed Vietnamese or English, ≤50/≤250 chars.
+
+Reply with strict JSON only.
 """
 
 
@@ -54,13 +64,13 @@ def _classify(entry: Dict, free_model_fn, zones: List[str]) -> Optional[Dict]:
     return _classify_tristate(entry, free_model_fn, zones)[1]
 
 
-def _classify_tristate(entry: Dict, free_model_fn, zones: List[str]):
+def _classify_tristate(entry: Dict, free_model_fn, tree_text: str):
     """Returns (status, parsed) where status is one of:
-    'ok'      -> parsed dict
-    'garbage' -> LLM answered but output invalid JSON / bad zone
+    'ok'      -> parsed dict with a valid action
+    'garbage' -> LLM answered but output invalid JSON / unknown action
     'down'    -> free_model_fn returned empty (no LLM available at all)
     """
-    prompt = _CLASSIFY_PROMPT.format(zones=", ".join(zones)) + \
+    prompt = _CLASSIFY_PROMPT.format(tree=tree_text[:4000]) + \
         "\n\nRECORD:\n" + json.dumps(entry, ensure_ascii=False)[:3000]
     try:
         raw = free_model_fn(prompt)
@@ -74,12 +84,60 @@ def _classify_tristate(entry: Dict, free_model_fn, zones: List[str]):
             raw = raw.strip("`")
             raw = raw[raw.find("{") : raw.rfind("}") + 1]
         data = json.loads(raw)
-        z = str(data.get("zone", "")).strip().lower()
-        if z and z not in [s.lower() for s in zones]:
+        act = str(data.get("action", "")).strip().lower()
+        if act not in ("none", "add", "merge", "child"):
             return "garbage", None
         return "ok", data
     except Exception:
         return "garbage", None
+
+
+def _apply(store, decision: Dict, rec: Dict) -> int:
+    """Execute a curator decision on the tree store. Returns records stored (0/1)."""
+    from .brain_store import FullError, BadBranch
+    act = decision.get("action")
+    if act in ("none",):
+        return 0
+    if act == "merge":
+        try:
+            store.merge(decision.get("branch", "brain.xlsx"),
+                        [int(i) for i in decision.get("ids", [])],
+                        str(decision.get("title") or "merged"),
+                        str(decision.get("content") or ""),
+                        str(decision.get("tags") or ""))
+            return 1
+        except Exception:
+            return 0
+    if act == "add":
+        try:
+            store.add(decision.get("branch", "brain.xlsx"),
+                      title=str(decision.get("title") or "")[:50],
+                      content=str(decision.get("content") or "")[:250],
+                      tags=str(decision.get("tags") or ""))
+            return 1
+        except FullError:
+            # auto-split: tạo node con rồi retry một lần vào trong nó
+            try:
+                parent = decision.get("branch", "brain.xlsx")
+                name = os.path.splitext(os.path.basename(parent))[0] + "-x"
+                node = store.child(parent, name, title=str(decision.get("title") or name)[:50])
+                store.add(node["file"], title=str(decision.get("title") or "")[:50],
+                          content=str(decision.get("content") or "")[:250],
+                          tags=str(decision.get("tags") or ""))
+                return 1
+            except Exception:
+                return 0
+        except Exception:
+            return 0
+    if act == "child":
+        try:
+            store.child(decision.get("parent", "brain.xlsx"),
+                        str(decision.get("name") or "sub"),
+                        title=str(decision.get("title") or decision.get("name") or "sub"))
+            return 1
+        except Exception:
+            return 0
+    return 0
 
 
 def process_logs(log_dir: str, store_root: str, free_model_fn,
@@ -143,47 +201,31 @@ def process_logs(log_dir: str, store_root: str, free_model_fn,
             if rec.get("_malformed"):
                 failed_records.append(rec)
                 continue
-            status, cls = _classify_tristate(rec, free_model_fn, zones)
+            tree_text = store.tree_text() if hasattr(store, "tree_text") else ""
+            status, cls = _classify_tristate(rec, free_model_fn, tree_text)
             if status == "down":
                 # LLM unavailable: NEVER write raw prompt/turn echoes to the
                 # store (2026-09 audit: that fallback polluted 5.8k junk rows).
-                # Keep the log for retry on a later pass; stop processing more
-                # records in this file to avoid hammering a dead endpoint.
+                # Keep the log for retry on a later pass.
                 classifier_down = True
                 failed_records.append(rec)
                 continue
             if status == "ok" and cls:
-                rid = store.add(
-                    zone=cls.get("zone", "knowledge"),
-                    brief=cls.get("brief", "")[:120],
-                    content=cls.get("content", "")[:300],
-                    title=cls.get("title", "")[:40],
-                    tags=cls.get("tags", ""),
-                )
-                # ChatGPT review B2: add() returns -1 on failure (it swallows
-                # exceptions defensively). Track success vs failure so we never
-                # delete a log that still has unpersisted records (mixed-success
-                # case: A persists, B fails -> B must be retried, not dropped).
-                if rid and rid > 0:
+                # Tree curator: action none/add/merge/child executed via _apply
+                got = _apply(store, cls, rec)
+                if cls.get("action") == "none":
+                    # deliberately dropped by curator: nothing to store/retry
+                    continue
+                if got:
                     count += 1
                     stored_any = True
                 else:
                     failed_records.append(rec)
             else:
-                # LLM answered but output was garbage: ONE raw backup so the
-                # knowledge is not lost (it is genuine fallback, not a down
-                # classifier echoing prompts). Marked for human triage.
-                raw = " ".join(str(rec.get(k, "")) for k in ("input", "output"))[:300]
-                if len(raw.strip()) >= 10:
-                    rid = store.add(zone="knowledge", brief=raw[:120],
-                                    content=raw[:300], title="auto-backup",
-                                    tags="auto-backup,classify-garbage")
-                    if rid and rid > 0:
-                        count += 1
-                        stored_any = True
-                    else:
-                        failed_records.append(rec)
-                # garbage is not retried (would loop forever on same output)
+                # Garbage decision on the v2 tree: keep the record for retry
+                # (the tree gives the LLM enough structure to recover next
+                # pass); do NOT dump raw turns — pollution was the v1 crime.
+                failed_records.append(rec)
         # Disposition:
         # - All records persisted  -> safe to delete the log.
         # - Some records failed    -> rewrite ONLY the failed ones back to a fresh

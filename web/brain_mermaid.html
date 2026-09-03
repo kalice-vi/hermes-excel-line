@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>🧠 Brain — Mermaid ⇄ excel_line</title>
+<style>
+  html, body { margin:0; height:100%; background:transparent; font-family:system-ui,sans-serif; }
+  #bar { position:fixed; top:0; left:0; right:0; height:34px; z-index:9; display:flex; align-items:center; gap:8px;
+         padding:0 10px; font-size:12px; color:var(--muted-foreground,#666);
+         background:color-mix(in srgb, var(--card,#fafafa) 90%, transparent); border-bottom:1px solid var(--border,#ddd); }
+  #bar button { font-size:12px; padding:3px 9px; border-radius:6px; border:1px solid var(--border,#ccc);
+                background:var(--card,#fff); color:var(--foreground,#222); cursor:pointer; }
+  #split { position:absolute; top:34px; left:0; right:0; bottom:0; display:flex; }
+  #left  { width:38%; min-width:220px; display:flex; flex-direction:column; border-right:1px solid var(--border,#ccc); }
+  #code  { flex:1; width:100%; box-sizing:border-box; border:0; resize:none; outline:none;
+           font:12.5px/1.55 Consolas,'Courier New',monospace; padding:10px 12px;
+           background:color-mix(in srgb, var(--card,#fff) 92%, transparent); color:var(--foreground,#111); }
+  #right { flex:1; overflow:auto; }
+  #c { width:100%; height:100%; display:grid; place-items:center; }
+  #c svg { max-width:none; }
+  #status { margin-left:auto; white-space:nowrap; }
+  #dirty { color:#b45309; display:none; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <button id="b_apply">⚡ Áp dụng vào Excel</button>
+  <button id="b_fmt">🧹 Format lại</button>
+  <button id="b_expand">⊞ Mở hết</button>
+  <button id="b_reload">↻ Tải từ Excel</button>
+  <span id="dirty">● chưa áp dụng</span>
+  <span id="status">đang tải…</span>
+</div>
+<div id="split">
+  <div id="left"><textarea id="code" spellcheck="false"></textarea></div>
+  <div id="right"><div id="c"></div></div>
+</div>
+<script src="mermaid/mermaid.min.js"></script>
+<script>
+mermaid.initialize({ startOnLoad: false, theme: 'neutral',
+  mindmap: { padding: 12 }, securityLevel: 'loose' });
+
+const code = document.getElementById('code'), status = document.getElementById('status');
+const dirtyMark = document.getElementById('dirty');
+let rev = null, lastSentRev = null, syncing = false, applyTimer = null;
+let fullMmd = null, wantFull = false;
+const RENDER_CAP = 1500;   // trên số memory này -> chỉ vẽ khung zone/tag
+
+function setStatus(t) { status.textContent = t; }
+
+function skeleton(txt) {
+  // giữ mindmap/root/📁/🏷 và tối đa 15 memory đầu mỗi tag để xem mẫu
+  const lines = txt.splitlines ? txt.split('\n') : txt.split('\n');
+  const out = []; let perTag = {};
+  for (const l of lines) {
+    const s = l.trim();
+    if (!s) continue;
+    const indent = l.length - l.length + (l.match(/^\s*/)[0] || '').length;
+    if (!s.startsWith('📄') && !s.startsWith('🔗')) { out.push(l); if (s.startsWith('🏷')) { perTag[s] = 0; } continue; }
+    if (s.startsWith('🔗')) continue;
+    const lastTag = [...out].reverse().find(x => x.trim().startsWith('🏷'));
+    if (lastTag && (perTag[lastTag.trim()] = (perTag[lastTag.trim()] || 0) + 1) <= 8) out.push(l);
+  }
+  return out.join('\n');
+}
+
+async function fetchMmd() {
+  const r = await fetch('/api/mmd?ts=' + Date.now());
+  return r.json();
+}
+
+async function refresh(force) {
+  try {
+    const j = await fetchMmd();
+    if (!j.rev) return;
+    if (j.rev !== rev && !syncing) {
+      rev = j.rev;
+      // agent/core vừa đổi Excel: ghi đè editor nếu user chưa sửa dở
+      if (force || !isDirty()) {
+        code.value = j.mmd;
+        setDirty(false);
+        lastSentRev = rev;
+      }
+      setStatus('✓ excel_line ' + new Date().toLocaleTimeString());
+    }
+    render(j.mmd !== undefined && code.value === j.mmd ? j.mmd : code.value);
+  } catch (e) { setStatus('⚠ ' + e); }
+}
+
+function render(txt) {
+  const c = document.getElementById('c');
+  c.innerHTML = '';
+  const memCount = (txt.match(/📄/g) || []).length;
+  const show = memCount > RENDER_CAP ? skeleton(txt) : txt;
+  if (memCount > RENDER_CAP) {
+    setStatus(`⚠ ${memCount} memories — render khung zone/tag + 8 memory/tag (giới hạn ${RENDER_CAP})`);
+  }
+  mermaid.render('mm', show).then(({svg}) => { c.innerHTML = svg; })
+    .catch(err => { c.innerHTML = '<pre style="padding:14px;color:#b91c1c">⚠ cú pháp: ' +
+      String(err.message || err).slice(0, 300) + '</pre>'; });
+}
+
+function isDirty() { return code.value !== lastSentText; }
+let lastSentText = '';
+function setDirty(on) { dirtyMark.style.display = on ? 'inline' : 'none'; }
+
+code.addEventListener('input', () => {
+  const on = code.value !== lastSentText;
+  setDirty(on);
+  clearTimeout(applyTimer);
+  // debounce: 1.2s sau khi ngừng gõ -> render thử, và nếu có cấu trúc hợp lệ thì tự áp
+  applyTimer = setTimeout(() => {
+    render(code.value);
+    if (code.value.trim() !== lastSentText.trim()) applyNow();
+  }, 1200);
+});
+
+async function applyNow() {
+  if (syncing || code.value === lastSentText) return;
+  syncing = true; setStatus('⋯ đang ghi Excel…');
+  try {
+    const r = await fetch('/api/mmd_sync', { method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ mmd: code.value }) });
+    const j = await r.json();
+    if (j.error) { setStatus('⚠ ' + j.error); return; }
+    // server trả về văn bản CHUẨN HÓA từ Excel (map-added id thật, format đúng)
+    code.value = j.mmd;
+    lastSentText = j.mmd;
+    setDirty(false);
+    syncing = false;
+    render(j.mmd);
+    setStatus('✓ ' + (j.applied || 0) + ' thay đổi đã ghi Excel ' + new Date().toLocaleTimeString());
+  } catch (e) { setStatus('⚠ lỗi: ' + e); }
+  finally { syncing = false; }
+}
+
+document.getElementById('b_apply').onclick = applyNow;
+document.getElementById('b_fmt').onclick = () => { refresh(true); setStatus('🧹 đã format từ Excel'); };
+document.getElementById('b_reload').onclick = () => { lastSentText = ''; refresh(true); };
+document.getElementById('b_expand').onclick = () => {
+  document.querySelectorAll('#c [class*=button], #c .node-circle, #c .mindmap-node--circle').forEach(e => e.dispatchEvent(new MouseEvent('click', {bubbles: true})));
+};
+
+(async () => {
+  const j = await fetchMmd();
+  rev = j.rev; code.value = j.mmd; lastSentText = j.mmd;
+  render(j.mmd);
+  setStatus('✓ excel_line · ' + (j.mmd.match(/📄/g) || []).length + ' memories');
+})();
+setInterval(() => refresh(false), 2000);  // agent ghi Excel → pane cập nhật
+</script>
+</body>
+</html>

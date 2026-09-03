@@ -33,10 +33,13 @@ def _stub():
 
 def main():
     _stub()
-    sys.path.insert(0, os.path.dirname(__file__))
+    plugin_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, plugin_root)
     import importlib.util
-    spec = importlib.util.spec_from_file_location("xl", "__init__.py")
-    xl = importlib.util.module_from_spec(spec); spec.loader.exec_module(xl)
+    spec = importlib.util.spec_from_file_location("excel_line", os.path.join(plugin_root, "__init__.py"))
+    xl = importlib.util.module_from_spec(spec)
+    sys.modules["excel_line"] = xl
+    spec.loader.exec_module(xl)
     from store import ExcelLineStore
 
     cfg = {"root": tempfile.mkdtemp(), "log_dir": tempfile.mkdtemp()}

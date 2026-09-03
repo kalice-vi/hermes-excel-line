@@ -48,53 +48,64 @@ logger = logging.getLogger(__name__)
 EXCEL_LINE_SCHEMA = {
     "name": "excel_line",
     "description": (
-        "Excel-backed long-term memory. The agent keeps durable, human-auditable "
-        "knowledge in Excel workbooks: a master index (brief + path) plus per-zone "
-        "files (user, project, pref, task, knowledge...).\n\n"
+        "Excel-backed hierarchical long-term memory — a TREE of workbooks where "
+        "every .xlsx holds AT MOST 10 rows (ID|Title|Content|Tags|Branch|Updated). "
+        "brain.xlsx is the root layer-1. A row with Branch='<x>.xlsx' is a NODE "
+        "(x.xlsx lives in the same folder as its parent file's stem); a row with a "
+        "non-.xlsx Branch is a LEAF asset file and must sit at the deepest level; "
+        "empty Branch = plain memory. Full file => merge older rows (compress) or "
+        "child() to split — never overflow. When a leaf asset grows into a project, "
+        "promote() replaces it with a .xlsx node and pushes the asset behind it.\n\n"
         "ACTIONS:\n"
-        "• add — Log a specific turn for the sub-agent to index. Provide session id, "
-        "the input sequence number to log (0 to omit), and the output sequence number "
-        "to log (0 to omit). The plugin finds that input/output in the session, writes "
-        "a log, and the free-model sub-agent indexes then deletes it.\n"
-        "• search — keyword search the master index (fast scan of brief + tags).\n"
-        "• read — open a zone file and return its concise knowledge rows.\n"
-        "• zones — list existing zone workbooks.\n"
-        "• update — edit an existing memory row (needs row_id + zone; pass brief/content/title/tags to change).\n"
-        "• delete — remove a memory row by row_id + zone.\n"
-        "• forget — delete all memories matching a keyword (e.g. forget 'old project').\n"
-        "Use excel_line to recall durable facts, preferences, projects, contacts, and "
-        "concise knowledge the user expects you to remember across sessions."
+        "• add — store one memory: branch (file path rel root, default brain.xlsx) "
+        "+ title<=50 + content<=250 + tags. Full branch => error telling you to merge/child.\n"
+        "• search — keyword scan the WHOLE tree; returns hit with branch path.\n"
+        "• read — rows of a branch file (branch='user.xlsx' or legacy zone name).\n"
+        "• tree — ASCII rendering of the tree with per-file usage (n/10).\n"
+        "• child — create a new sub-branch file under parent + the linking row.\n"
+        "• move — move row ids from one file to another (rebalance).\n"
+        "• merge — compress several rows (ids) into ONE new memory (frees slots).\n"
+        "• promote — turn a leaf-asset row into a .xlsx node, asset moves behind it.\n"
+        "• update/delete — edit/remove a row by row_id (branch optional, auto-found).\n"
+        "• forget — delete all rows matching a keyword.\n"
+        "• add (legacy mode) — session+input_seq/output_seq logs a turn for the "
+        "free-model sub-agent curator to classify/compress into the tree.\n"
+        "Prefer add with explicit branch+title+content (direct, durable). Keep "
+        "memories compressed, reusable, never verbatim conversation.\\n"
+        "Use search/tree to RECALL — excel_line is the long-term brain; built-in "
+        "memory is only the fast cache."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "search", "read", "zones", "update", "delete", "forget"],
+                "enum": ["add", "search", "read", "tree", "child", "move", "merge",
+                         "promote", "update", "delete", "forget", "zones"],
             },
-            "session": {
-                "type": "string",
-                "description": "Session id whose turn to log (use 'current' for the active session).",
-            },
-            "input_seq": {
-                "type": "integer",
-                "description": "1-based sequence number of the input to log (0 to omit input).",
-            },
-            "output_seq": {
-                "type": "integer",
-                "description": "1-based sequence number of the output to log (0 to omit output).",
-            },
-            "query": {"type": "string", "description": "Keyword for 'search'."},
-            "zone": {
-                "type": "string",
-                "description": "Zone name for 'read'/'add' (e.g. user, project, knowledge).",
-            },
-            "brief": {"type": "string", "description": "1-sentence summary for 'add' (goes to master index)."},
-            "content": {"type": "string", "description": "Concise knowledge for 'add' (goes to the zone file)."},
-            "title": {"type": "string", "description": "Short title for 'add'."},
-            "tags": {"type": "string", "description": "Comma-separated tags."},
+            "session": {"type": "string",
+                        "description": "Legacy add: session id whose turn to log ('current')."},
+            "input_seq": {"type": "integer",
+                          "description": "Legacy add: 1-based input seq to log (0 omit)."},
+            "output_seq": {"type": "integer",
+                           "description": "Legacy add: 1-based output seq to log (0 omit)."},
+            "branch": {"type": "string",
+                       "description": "Target .xlsx branch rel root (e.g. 'brain.xlsx', 'skill/einvoicing.xlsx'); '' = brain.xlsx."},
+            "parent": {"type": "string", "description": "child: parent .xlsx."},
+            "name": {"type": "string", "description": "child/promote: new node name (no .xlsx)."},
+            "ids": {"type": "array", "items": {"type": "integer"},
+                    "description": "move/merge: row ids."},
+            "dst": {"type": "string", "description": "move: destination .xlsx (must have room)."},
+            "title": {"type": "string", "description": "<=50 chars."},
+            "content": {"type": "string", "description": "<=250 chars, compressed."},
+            "tags": {"type": "string", "description": "comma keywords for branch navigation."},
+            "link": {"type": "string",
+                     "description": "add: LEAF asset path rel root that must exist (e.g. 'skill/x.py'); omit for plain memory."},
+            "row_id": {"type": "integer", "description": "update/delete/promote: row id."},
+            "query": {"type": "string", "description": "search/forget keyword."},
+            "zone": {"type": "string", "description": "Legacy alias of branch for read/add."},
+            "brief": {"type": "string", "description": "Legacy alias: title/content for direct store."},
             "limit": {"type": "integer", "description": "Max rows (default 10)."},
-            "row_id": {"type": "integer", "description": "Memory row id for 'update'/'delete'."},
         },
         "required": ["action"],
     },
@@ -170,8 +181,8 @@ class ExcelLineProvider(MemoryProvider):
         self._log_dir = _log_dir(self._config, self._root)
         os.makedirs(self._root, exist_ok=True)
         os.makedirs(self._log_dir, exist_ok=True)
-        from .store import ExcelLineStore
-        self._store = ExcelLineStore(self._root)
+        from .brain_store import BrainStore
+        self._store = BrainStore(self._root)
         self._session_id = session_id
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
@@ -493,15 +504,61 @@ class ExcelLineProvider(MemoryProvider):
         try:
             if action == "add":
                 return self._handle_add(args)
+            if action == "tree":
+                return json.dumps({"tree": self._store.tree_text()})
+            if action == "child":
+                try:
+                    res = self._store.child(args.get("parent", "brain.xlsx"),
+                                            args.get("name", "sub"),
+                                            title=args.get("title", ""),
+                                            content=(args.get("content") or "")[:250],
+                                            tags=args.get("tags", ""))
+                    return json.dumps({"status": "created", **res})
+                except Exception as e:
+                    return tool_error(str(e))
+            if action == "move":
+                try:
+                    n = self._store.move(args.get("branch", "brain.xlsx"),
+                                         [int(i) for i in args.get("ids", [])],
+                                         args.get("dst", "brain.xlsx"))
+                    return json.dumps({"status": "moved", "count": n})
+                except Exception as e:
+                    return tool_error(str(e))
+            if action == "merge":
+                try:
+                    mid = self._store.merge(args.get("branch", "brain.xlsx"),
+                                            [int(i) for i in args.get("ids", [])],
+                                            args.get("title", "merged"),
+                                            (args.get("content") or "")[:250],
+                                            args.get("tags", ""))
+                    return json.dumps({"status": "merged", "id": mid})
+                except Exception as e:
+                    return tool_error(str(e))
+            if action == "promote":
+                try:
+                    res = self._store.promote(args.get("branch", "brain.xlsx"),
+                                              int(args.get("row_id", 0)),
+                                              args.get("name", "tool"))
+                    return json.dumps({"status": "promoted", **res})
+                except Exception as e:
+                    return tool_error(str(e))
             if action == "search":
-                hits = self._store.search_index(
-                    args.get("query", ""), limit=int(args.get("limit", 10)))
+                hits = (self._store.search(args.get("query", ""),
+                                           limit=int(args.get("limit", 10)))
+                        if hasattr(self._store, "search")
+                        else self._store.search_index(args.get("query", ""),
+                                                      limit=int(args.get("limit", 10))))
                 return json.dumps({"results": hits, "count": len(hits)})
             if action == "read":
-                zone = args.get("zone", "knowledge")
-                rows = self._store.read_zone(
-                    self._store.zone_path(zone), limit=int(args.get("limit", 20)))
-                return json.dumps({"zone": zone, "rows": rows, "count": len(rows)})
+                br = args.get("branch") or args.get("zone") or "brain.xlsx"
+                if not str(br).endswith(".xlsx"):
+                    br = str(br) + ".xlsx"
+                try:
+                    rows = self._store.load_rows(br)
+                except Exception:
+                    rows = []
+                return json.dumps({"branch": br, "rows": rows, "count": len(rows),
+                                   "usage": f"{len(rows)}/10"})
             if action == "zones":
                 return json.dumps({"zones": self._store.list_zones()})
             if action == "update":
@@ -549,28 +606,43 @@ class ExcelLineProvider(MemoryProvider):
             sid = self._session_id or "default"
 
         # --- Direct-store mode: write immediately, no LLM dependency ---
+        # v2 tree params: branch/title/content/tags/link ; legacy: zone/brief
         zone = (args.get("zone") or "").strip()
+        branch = (args.get("branch") or "").strip()
         brief = (args.get("brief") or "").strip()
         content = (args.get("content") or "").strip()
-        title = (args.get("title") or brief[:40]).strip()
+        title = (args.get("title") or brief[:50]).strip()
         tags = (args.get("tags") or "").strip()
-        if zone and (brief or content):
+        link = (args.get("link") or "").strip()
+        if (branch or zone) and (title or content or brief):
+            from .brain_store import FullError
             try:
-                mid = self._store.add(zone=zone, brief=brief[:120],
-                                      content=content[:300], title=title[:40],
-                                      tags=tags)
+                if branch or link:
+                    mid = self._store.add(branch or zone or "brain.xlsx",
+                                          title=title[:50], content=content[:250],
+                                          tags=tags, link=link)
+                else:
+                    mid = self._store.add(zone=zone, brief=brief[:250],
+                                          content=content[:250], title=title[:50],
+                                          tags=tags)
                 if not mid or mid < 0:
-                    # store.add() failed (lock/IO/unknown zone) -> be truthful so the
-                    # agent does not believe the memory is durable (ChatGPT r6 WARN).
                     return json.dumps({
-                        "status": "error", "id": mid, "zone": zone,
+                        "status": "error", "id": mid, "branch": branch or zone,
                         "note": "Store write failed; memory was NOT persisted.",
                     })
                 return json.dumps({
-                    "status": "stored", "id": mid, "zone": zone,
-                    "note": "Written directly to the Excel store (no indexer needed).",
+                    "status": "stored", "id": mid,
+                    "branch": branch or zone,
+                    "path": self._store.path_of(mid) if hasattr(self._store, "path_of") else "",
+                    "note": "Written to the Excel tree (no indexer needed).",
                 })
             except Exception as e:
+                if type(e).__name__ == "FullError":
+                    return json.dumps({
+                        "status": "branch_full", "error": str(e),
+                        "note": "File đầy 10/10. Hãy merge nén các dòng cũ (chọn ids "
+                                "tương đồng) HOẶC child() tách nhánh rồi add lại.",
+                    })
                 return tool_error(f"Direct store failed: {e}")
 
         # --- Sequence / direct-log modes: go through the log + indexer ---

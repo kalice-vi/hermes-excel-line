@@ -155,11 +155,11 @@ def test_worker_no_drop_on_fail():
 
 
 def test_worker_fallback_raw_store():
-    """Classify fails -> worker still stores a raw-text backup (no data loss)."""
+    """Classify returns garbage on v2 tree -> worker keeps log for retry (no pollution)."""
     worker = _load_worker()
-    from store import ExcelLineStore
+    from brain_store import BrainStore
     root = tempfile.mkdtemp(); logd = tempfile.mkdtemp()
-    store = ExcelLineStore(root)
+    store = BrainStore(root)
     def bad_model(prompt):
         return "not json at all"
     log = os.path.join(logd, "sess_i1_o1_20260101.jsonl")
@@ -167,20 +167,20 @@ def test_worker_fallback_raw_store():
         f.write(json.dumps({"session": "s", "input": "remember the Honda bike purchase",
                             "output": "ok noted", "ts": "2026"}) + "\n")
     stored = worker.process_logs(logd, root, bad_model, store=store)
-    check("worker raw-backup stores on classify fail", stored == 1)
-    check("worker deletes log after raw-backup", not os.path.exists(log))
-    rows = store.read_zone(store.zone_path("knowledge"), limit=5)
-    check("raw-backup content persisted", rows and "Honda" in rows[-1]["content"])
+    check("worker keeps store clean on classify fail", stored == 0)
+    import glob as _g
+    retries = _g.glob(os.path.join(logd, "retry_*"))
+    check("worker leaves retry log on classify fail", bool(retries))
 
 
 def test_worker_store_on_success():
     worker = _load_worker()
-    from store import ExcelLineStore
+    from brain_store import BrainStore
     root = tempfile.mkdtemp(); logd = tempfile.mkdtemp()
-    store = ExcelLineStore(root)
+    store = BrainStore(root)
     def good_model(prompt):
-        return json.dumps({"zone": "knowledge", "brief": "classified",
-                           "title": "t", "content": "c", "tags": "k"})
+        return json.dumps({"action": "add", "branch": "brain.xlsx",
+                           "title": "classified", "content": "compressed c", "tags": "k"})
     log = os.path.join(logd, "sess_i1_o1_20260101.jsonl")
     with open(log, "w", encoding="utf-8") as f:
         f.write(json.dumps({"session": "s", "input": "x", "output": "y", "ts": "t"}) + "\n")
@@ -360,12 +360,12 @@ def test_lazy_index_and_raw_backup():
     """prefetch() must lazily drain pending seq-logs, and on_session_end must
     back up the raw transcript when extraction yields nothing."""
     xl = _load_plugin()
-    from store import ExcelLineStore
+    from brain_store import BrainStore
     import tempfile, types as _t
     root = tempfile.mkdtemp(); logd = tempfile.mkdtemp()
     p = xl.ExcelLineProvider({"root": root, "log_dir": logd})
     p._root = root; p._log_dir = logd
-    p._store = ExcelLineStore(root); p._session_id = "qa"
+    p._store = BrainStore(root); p._session_id = "qa"
 
     # 1) seed a seq-log; the BACKGROUND indexer (not prefetch) drains it.
     #    prefetch() must stay cheap (no synchronous LLM call) — it only searches.
@@ -377,9 +377,13 @@ def test_lazy_index_and_raw_backup():
     # make indexer produce a usable record by overriding the free-model fn
     # on the registered plugin module (the one _drain_pending_logs uses)
     import sys as _sys
+    # patch BOTH: llm=None path (_ask_free_model) và llm=callable path (worker.llm)
     _sys.modules["excel_line_plugin"]._ask_free_model = lambda p, model="x", llm=None: json.dumps(
-        {"zone": "knowledge", "brief": "Honda purchase noted",
-         "title": "honda", "content": "user bought Honda", "tags": "k"})
+        {"action": "add", "branch": "brain.xlsx", "title": "Honda purchase noted",
+         "content": "user bought Honda", "tags": "k"})
+    # also patch the worker's own llm closure if present so drain_pending_logs uses the mock too
+    if hasattr(p, "_worker") and p._worker:
+        p._worker.llm = lambda pr, model="x": _sys.modules["excel_line_plugin"]._ask_free_model(pr, model)
     # prefetch should NOT drain (Gemini review #4) — it only searches existing index.
     res0 = p.prefetch("Honda", session_id="qa")
     check("prefetch does not drain log (stays cheap)", _os.path.exists(log))
@@ -396,7 +400,7 @@ def test_lazy_index_and_raw_backup():
     logd2 = tempfile.mkdtemp(); root2 = tempfile.mkdtemp()
     p2 = xl.ExcelLineProvider({"root": root2, "log_dir": logd2})
     p2._root = root2; p2._log_dir = logd2
-    p2._store = ExcelLineStore(root2); p2._session_id = "qa2"
+    p2._store = BrainStore(root2); p2._session_id = "qa2"
     _sys.modules["excel_line_plugin"]._ask_free_model = lambda p, model="x", llm=None: "not json"  # force classify fail
     msgs = [{"role": "user", "content": "remember seagift format 2026"},
             {"role": "assistant", "content": "ok"}]
