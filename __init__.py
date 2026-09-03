@@ -633,19 +633,20 @@ def _ask_free_model(prompt: str, model: str, llm=None) -> str:
     # Preferred: the host's PluginLlm facade (ctx.llm), bound at register().
     if llm is not None:
         msgs = [{"role": "user", "content": prompt}]
-        try:
-            res = llm.complete(messages=msgs, model=model or None,
-                               purpose="excel_line-classify")
-            return (getattr(res, "text", "") or "").strip()
-        except PermissionError:
-            # Trust gate rejected the model override — retry with host default.
+        # Try the configured free model first; on ANY failure (trust-gate
+        # PermissionError, timeout of a dead endpoint, provider error) retry
+        # once with the host default model before declaring the LLM down.
+        # (2026-09 QA: gemini-3.5-flash-lite ReadTimeout 62s, host default OK.)
+        for attempt_kwargs in ({"model": model or None}, {}):
             try:
-                res = llm.complete(messages=msgs, purpose="excel_line-classify")
-                return (getattr(res, "text", "") or "").strip()
+                res = llm.complete(messages=msgs, purpose="excel_line-classify",
+                                   **attempt_kwargs)
+                text = (getattr(res, "text", "") or "").strip()
+                if text:
+                    return text
             except Exception:
-                return ""
-        except Exception:
-            return ""
+                continue
+        return ""
     # Legacy one-shot helper (existed in older runtimes; gone from core).
     try:
         from agent.run_agent import quick_completion  # type: ignore
