@@ -622,31 +622,117 @@ class ExcelLineProvider(MemoryProvider):
         })
 
 
-def _ask_free_model(prompt: str, model: str, llm=None) -> str:
-    """Call a host-owned model in-process to classify a record.
+# ---------------------------------------------------------------------------
+# Keyless free-model rotation (OpenCode Zen free tier) + host default
+# ---------------------------------------------------------------------------
+# Verified keyless slugs on the opencode-free provider (no API key ever).
+# Live probe 03/09/2026: laguna OK 35s; muse-spark OK-ish (transient 5xx);
+# hy3-free/x-preview-f-free currently 401; nemotrons time out host-side.
+# Dead slugs stay LAST — they may recover, and rotation reaches them only
+# when everything above fails.
+FREE_ROTATION = [
+    "laguna-s-2.1-free",
+    "muse-spark-1.2-contributor-free",
+    "nemotron-3.5-lightning-free",
+    "nemotron-3-ultra-free",
+    "hy3-free",
+    "x-preview-f-free",
+]
+_choice_path = None          # module-level, set by _init_choice_path()
+_preferred = None            # pinned model name (from /excel-line model), or None
 
-    Returns "" when NO LLM is available. Callers must treat "" as a retryable
-    failure (keep the log for a later pass) — previously this returned fake
-    JSON, which made the worker believe classification succeeded and polluted
-    the store with raw prompt/user-turn echoes (2026-09 audit: 5.8k junk rows).
+
+def _load_pref() -> dict:
+    """Read the user's model choice from <root>/model_choice.json."""
+    global _choice_path, _preferred
+    try:
+        root = _root_dir(_load_plugin_config())
+        _choice_path = os.path.join(root, "model_choice.json")
+        if os.path.exists(_choice_path):
+            with open(_choice_path, encoding="utf-8") as f:
+                _preferred = json.load(f).get("preferred")
+    except Exception:
+        _preferred = None
+    return {"preferred": _preferred}
+
+
+def _save_pref(preferred):
+    global _preferred
+    _preferred = preferred
+    try:
+        if _choice_path:
+            with open(_choice_path, "w", encoding="utf-8") as f:
+                json.dump({"preferred": preferred}, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _call_provider(provider, model, prompt, timeout=20):
+    """One keyless/known-provider completion attempt via the host client.
+    Returns text or raises."""
+    from agent.auxiliary_client import call_llm
+    resp = call_llm(task=None, provider=provider, model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=timeout)
+    try:
+        return resp.choices[0].message.content or ""
+    except Exception:
+        return str(getattr(resp, "content", resp) or "")
+
+
+def _rotation_chain(free_model):
+    """Ordered (provider, model) attempts honoring the user's preference.
+
+    ('host', None) sentinel resolved by caller → host default via llm facade.
     """
-    # Preferred: the host's PluginLlm facade (ctx.llm), bound at register().
+    pref = _preferred
+    if pref == "host":
+        return []                      # llm facade (host default) handles it
+    chain = []
+    if pref:
+        if pref in FREE_ROTATION:
+            chain.append(("opencode-free", pref))
+        elif "/" in pref:
+            p, m = pref.split("/", 1)
+            chain.append((p, m))
+        else:
+            chain.append((None, pref))
+    else:
+        # no pin: configured free_model first (provider-agnostic resolution)
+        if free_model:
+            chain.append((None, free_model))
+    # keyless rotation after the pin/config model
+    for slug in FREE_ROTATION:
+        if ("opencode-free", slug) not in chain:
+            chain.append(("opencode-free", slug))
+    return chain
+
+
+def _ask_free_model(prompt: str, model: str, llm=None) -> str:
+    """Classify a record via a ROTATING keyless free-model chain.
+
+    Order: user-pinned model (from /excel-line model) -> configured free_model
+    -> OpenCode-Zen free rotation (no API key needed at install time) ->
+    host default model via the ctx.llm facade. Any failure (timeout, 401,
+    UA-gate, trust-gate) moves to the next candidate; '' only when ALL fail
+    (worker then keeps the log retryable and never writes to the store).
+    """
+    # 1-2) provider chain incl. keyless opencode-free rotation
+    for provider, mdl in _rotation_chain(model):
+        try:
+            text = _call_provider(provider, mdl, prompt).strip()
+            if text:
+                return text
+        except Exception:
+            continue
+    # 3) host default model through the plugin facade (last resort)
     if llm is not None:
-        msgs = [{"role": "user", "content": prompt}]
-        # Try the configured free model first; on ANY failure (trust-gate
-        # PermissionError, timeout of a dead endpoint, provider error) retry
-        # once with the host default model before declaring the LLM down.
-        # (2026-09 QA: gemini-3.5-flash-lite ReadTimeout 62s, host default OK.)
-        for attempt_kwargs in ({"model": model or None}, {}):
-            try:
-                res = llm.complete(messages=msgs, purpose="excel_line-classify",
-                                   **attempt_kwargs)
-                text = (getattr(res, "text", "") or "").strip()
-                if text:
-                    return text
-            except Exception:
-                continue
-        return ""
+        try:
+            res = llm.complete(messages=[{"role": "user", "content": prompt}],
+                               purpose="excel_line-classify")
+            return (getattr(res, "text", "") or "").strip()
+        except Exception:
+            return ""
     # Legacy one-shot helper (existed in older runtimes; gone from core).
     try:
         from agent.run_agent import quick_completion  # type: ignore
@@ -655,11 +741,83 @@ def _ask_free_model(prompt: str, model: str, llm=None) -> str:
         return ""
 
 
+def _model_command(raw_args: str) -> str:
+    """/excel-line [model ...] — picker for providers/models integrated in Hermes.
+
+    Usage:
+      /excel-line model              list current choice + available models
+      /excel-line model <n>          pick from the listed number
+      /excel-line model host         use the host's default agent model
+      /excel-line model auto         back to rotation (opencode-free keyless)
+    """
+    parts = (raw_args or "").strip().lower().split()
+    _load_pref()
+    arg = parts[0] if parts else ""
+    if arg in ("model", "") or (arg == "model" and len(parts) == 1):
+        arg = parts[1] if len(parts) > 1 and arg == "model" else ""
+    if not arg:
+        # ---- list ----
+        lines = ["🧠 **excel_line classifier model**",
+                 f"Hiện chọn: **{_preferred or 'auto (xoay vòng free + host default)'}**", ""]
+        lines.append("Keyless — OpenCode Zen free (không cần API key):")
+        n = 1
+        idx = {}
+        for slug in FREE_ROTATION:
+            ok = " ⭐" if _preferred == slug else ""
+            lines.append(f"  {n}. `{slug}`{ok}")
+            idx[n] = slug; n += 1
+        lines.append(f"  {n}. `host` — model chính của Hermes bạn{'' if _preferred!='host' else ' ⭐'}")
+        idx[n] = "host"; n += 1
+        lines.append(f"  {n}. `auto` — xoay vòng toàn bộ{'' if _preferred else ' ⭐'}")
+        idx[n] = "auto"
+        # extra: a couple of known no-key providers already configured
+        try:
+            from hermes_cli.config import load_config_readonly
+            cfg = load_config_readonly() or {}
+            prov = cfg.get("model", {}).get("provider")
+            mdl = cfg.get("model", {}).get("model")
+            if prov and mdl:
+                lines.append(f"\nProvider hiện cấu hình trong Hermes: `{prov}/{mdl}` (đã có key sẵn).")
+                lines.append(f"Dùng: `/excel-line model {prov}/{mdl}`")
+        except Exception:
+            pass
+        lines.append("\nChọn bằng số: `/excel-line model <số>`")
+        _save_pref(_preferred)  # ensures file exists; keep value
+        _model_command._idx = idx
+        return "\n".join(lines)
+    # ---- set ----
+    if arg == "auto":
+        _save_pref(None)
+        return "✅ Đã đặt lại: xoay vòng model free (OpenCode Zen keyless) → host default."
+    if arg == "host":
+        _save_pref("host")
+        return "✅ excel_line sẽ phân loại memory bằng model chính của Hermes bạn."
+    idxmap = getattr(_model_command, "_idx", {})
+    if arg.isdigit() and int(arg) in idxmap:
+        arg = idxmap[int(arg)]
+    if arg in FREE_ROTATION:
+        _save_pref(arg)
+        return f"✅ Đã pin `{arg}` (OpenCode Zen free, keyless) cho bộ nhớ excel_line."
+    if "/" in arg:
+        _save_pref(arg)
+        return f"✅ Đã pin `{arg}`. (Nếu provider cần key, Hermes sẽ dùng key bạn đã có — không có thì tự xoay vòng free.)"
+    _save_pref(arg)
+    return f"✅ Đã đặt model: `{arg}`."
+
+
 # ---------------------------------------------------------------------------
 # Plugin entry point
 # ---------------------------------------------------------------------------
 
 def register(ctx) -> None:
     config = _load_plugin_config()
+    _load_pref()   # model_choice.json của user (từ /excel-line model)
     provider = ExcelLineProvider(config=config, llm=getattr(ctx, "llm", None))
     ctx.register_memory_provider(provider)
+    try:
+        ctx.register_command(
+            "excel-line", _model_command,
+            description="Chọn model phân loại memory excel_line (free/keyless rotation)",
+            args_hint="[model] [tên|số|host|auto]")
+    except Exception as e:
+        logging.getLogger(__name__).debug("excel_line command register failed: %s", e)
