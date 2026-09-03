@@ -643,8 +643,7 @@ class ExcelLineProvider(MemoryProvider):
                 if type(e).__name__ == "FullError":
                     return json.dumps({
                         "status": "branch_full", "error": str(e),
-                        "note": "File đầy 10/10. Hãy merge nén các dòng cũ (chọn ids "
-                                "tương đồng) HOẶC child() tách nhánh rồi add lại.",
+                        "note": "File is full (10/10). Please merge/compress older rows (select similar IDs) OR create a child() branch and retry.",
                     })
                 return tool_error(f"Direct store failed: {e}")
 
@@ -833,51 +832,51 @@ def _model_command(raw_args: str) -> str:
     if not arg:
         # ---- list ----
         lines = ["🧠 **excel_line classifier model**",
-                 f"Hiện chọn: **{_preferred or 'auto (xoay vòng free + host default)'}**", ""]
-        lines.append("Keyless — OpenCode Zen free (không cần API key):")
+                 f"Currently selected: **{_preferred or 'auto (free rotation + host default)'}**", ""]
+        lines.append("Keyless — OpenCode Zen free (no API key required):")
         n = 1
         idx = {}
         for slug in FREE_ROTATION:
             ok = " ⭐" if _preferred == slug else ""
             lines.append(f"  {n}. `{slug}`{ok}")
             idx[n] = slug; n += 1
-        lines.append(f"  {n}. `host` — model chính của Hermes bạn{'' if _preferred!='host' else ' ⭐'}")
+        lines.append(f"  {n}. `host` — Hermes main agent model{'' if _preferred!='host' else ' ⭐'}")
         idx[n] = "host"; n += 1
-        lines.append(f"  {n}. `auto` — xoay vòng toàn bộ{'' if _preferred else ' ⭐'}")
+        lines.append(f"  {n}. `auto` — rotate all keyless models{'' if _preferred else ' ⭐'}")
         idx[n] = "auto"
         # extra: a couple of known no-key providers already configured
         try:
-            from hermes_cli.config import load_config_readonly
-            cfg = load_config_readonly() or {}
+            from hermes_cli.config import load_config_readonly, cfg_get
+            cfg = load_config_readonly()
             prov = cfg.get("model", {}).get("provider")
             mdl = cfg.get("model", {}).get("model")
             if prov and mdl:
-                lines.append(f"\nProvider hiện cấu hình trong Hermes: `{prov}/{mdl}` (đã có key sẵn).")
-                lines.append(f"Dùng: `/excel-line model {prov}/{mdl}`")
+                lines.append(f"\nConfigured Hermes provider: `{prov}/{mdl}`")
+                lines.append(f"Use: `/excel-line model {prov}/{mdl}`")
         except Exception:
             pass
-        lines.append("\nChọn bằng số: `/excel-line model <số>`")
+        lines.append("\nSelect by number: `/excel-line model <number>`")
         _save_pref(_preferred)  # ensures file exists; keep value
         _model_command._idx = idx
         return "\n".join(lines)
-    # ---- set ----
+
     if arg == "auto":
         _save_pref(None)
-        return "✅ Đã đặt lại: xoay vòng model free (OpenCode Zen keyless) → host default."
+        return "✅ Reset model preference: free model rotation (OpenCode Zen keyless) → host default."
     if arg == "host":
         _save_pref("host")
-        return "✅ excel_line sẽ phân loại memory bằng model chính của Hermes bạn."
+        return "✅ excel_line will classify memories using your main Hermes model."
     idxmap = getattr(_model_command, "_idx", {})
     if arg.isdigit() and int(arg) in idxmap:
         arg = idxmap[int(arg)]
     if arg in FREE_ROTATION:
         _save_pref(arg)
-        return f"✅ Đã pin `{arg}` (OpenCode Zen free, keyless) cho bộ nhớ excel_line."
+        return f"✅ Pinned `{arg}` (OpenCode Zen free, keyless) for excel_line memory."
     if "/" in arg:
         _save_pref(arg)
-        return f"✅ Đã pin `{arg}`. (Nếu provider cần key, Hermes sẽ dùng key bạn đã có — không có thì tự xoay vòng free.)"
+        return f"✅ Pinned `{arg}`."
     _save_pref(arg)
-    return f"✅ Đã đặt model: `{arg}`."
+    return f"✅ Set model to `{arg}`."
 
 
 # ---------------------------------------------------------------------------

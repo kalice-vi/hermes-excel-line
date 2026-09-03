@@ -107,7 +107,7 @@ check("ID không tái sử dụng sau xóa", new_id > tmp_id, f"{tmp_id} -> {new
 
 # 11. tree + find + path_of
 tr = s.tree()
-check("tree có children", len(tr["children"]) >= 1)
+check("tree có children", "brain.xlsx" in tr and "pref.xlsx" in tr)
 f = s.find(mid)
 check("find(id) xác định branch", f and f["branch"] == "pref.xlsx")
 pth = s.path_of(mid)

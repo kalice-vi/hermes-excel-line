@@ -37,17 +37,18 @@ CURRENT TREE (usage per file shown):
 {tree}
 
 Decide what to do with the RECORD below. Rules:
-- Chitchat, transient commands, narration, one-off task orders => {{"action":"none"}}. NEVER store verbatim user messages.
-- If a plain fact FITS an existing branch with room => {{"action":"add","branch":"<file.xlsx>","title":"<=50 chars","content":"<=250 chars, compressed knowledge NOT the raw dialogue","tags":"comma,keywords"}}.
-- Prefer UPDATING/compressing an older memory over creating near-duplicates:
-  {{"action":"merge","branch":"<file>","ids":[..],"title":"gộp","content":"nén các ý","tags":".."}}
-- Branch full (10/10) and the fact is genuinely new => split:
-  {{"action":"child","parent":"<file>","name":"<sub-nhánh>","title":"<=50"}}
-  (the worker will then retry the add inside the new child automatically)
-- Only create LEAF assets when the record references a real file that belongs to a memory.
-Title/Content must be reusable knowledge, compressed Vietnamese or English, ≤50/≤250 chars.
+1. Ignore chitchat, transient commands, narration, one-off task orders => {{"action":"none"}}. NEVER store verbatim user dialogue.
+2. Only extract durable, reusable knowledge, preferences, or conventions that will matter in future sessions.
+3. Write the memory title, content, and tags in the USER'S PRIMARY LANGUAGE (e.g. Vietnamese if the user communicates in Vietnamese, English if English).
+4. If a plain fact FITS an existing branch with room => {{"action":"add","branch":"<file.xlsx>","title":"<=50 chars","content":"<=250 chars, compressed knowledge NOT raw dialogue","tags":"comma,keywords"}}.
+5. Prefer UPDATING/compressing older memories over creating near-duplicates:
+   {{"action":"merge","branch":"<file>","ids":[..],"title":"compressed summary","content":"concise knowledge","tags":".."}}
+6. If a branch is full (10/10) and the fact is genuinely new => split branch:
+   {{"action":"child","parent":"<file>","name":"<sub_branch>","title":"<=50 chars"}}
+   (the worker will automatically retry adding inside the new child branch)
+7. Only create LEAF assets when the record references a real file belonging to a memory.
 
-Reply with strict JSON only.
+Title ≤50 chars, Content ≤250 chars. Reply with strict JSON only.
 """
 
 
