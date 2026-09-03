@@ -142,8 +142,9 @@ def _safe_sid(sid: str) -> str:
 class ExcelLineProvider(MemoryProvider):
     """Excel-backed long-term memory; agent-driven logging + free-model indexer."""
 
-    def __init__(self, config: dict | None = None):
+    def __init__(self, config: dict | None = None, llm=None):
         self._config = config or _load_plugin_config()
+        self._llm = llm  # host PluginLlm facade (ctx.llm) for classification
         self._store: Optional["ExcelLineStore"] = None
         self._root = ""
         self._log_dir = ""
@@ -212,7 +213,7 @@ class ExcelLineProvider(MemoryProvider):
                 free_model = self._config.get("free_model", "gemini-3.5-flash-lite")
                 index_while_logs_present(
                     log_dir=log_dir, store_root=self._root,
-                    free_model_fn=lambda p: _ask_free_model(p, free_model),
+                    free_model_fn=lambda p: _ask_free_model(p, free_model, llm=self._llm),
                     store=self._store)
             except Exception as e:
                 logger.debug("excel_line lazy index failed: %s", e)
@@ -319,7 +320,7 @@ class ExcelLineProvider(MemoryProvider):
         free_model = self._config.get("free_model", "gemini-3.5-flash-lite")
 
         def _call_free(prompt: str) -> str:
-            return _ask_free_model(prompt, free_model)
+            return _ask_free_model(prompt, free_model, llm=self._llm)
 
         return index_while_logs_present(
             log_dir=self._log_dir,
@@ -406,13 +407,15 @@ class ExcelLineProvider(MemoryProvider):
             '"tags":"comma keywords"}\n\n'
             f"TRANSCRIPT:\n{transcript[:6000]}"
         )
-        raw = _ask_free_model(prompt, self._config.get("free_model", "gemini-3.5-flash-lite"))
+        raw = _ask_free_model(prompt, self._config.get("free_model", "gemini-3.5-flash-lite"),
+                              llm=self._llm)
         facts = self._parse_facts(raw)
         if not facts:
-            # LLM unavailable or returned no structured facts: fall back to a
-            # safe, no-LLM backup — persist raw user turns so memory is never
-            # lost even without the classifier.
-            return self._fallback_store(turns)
+            # LLM down or returned garbage: do NOT dump raw turns into the
+            # store (2026-09 audit: _fallback_store polluted 5.8k rows).
+            # on_session_end keeps the raw transcript as a session_raw_ log
+            # for a future, properly-classified pass instead.
+            return 0
         stored = 0
         for f in facts:
             zone = f.get("zone", "knowledge")
@@ -431,26 +434,6 @@ class ExcelLineProvider(MemoryProvider):
                     stored += 1
             except Exception as e:
                 logger.debug("excel_line auto_extract store failed: %s", e)
-        return stored
-
-    def _fallback_store(self, turns: List[str]) -> int:
-        """No-LLM backup: store each user turn verbatim into the knowledge zone
-        so nothing is silently dropped when the classifier is unavailable."""
-        stored = 0
-        for t in turns:
-            if not t.lower().startswith("user:"):
-                continue
-            text = t[len("user:"):].strip()
-            if len(text) < 10:
-                continue
-            try:
-                rid = self._store.add(zone="knowledge", brief=text[:120],
-                                     content=text[:300], title=text[:40],
-                                     tags="auto-backup")
-                if rid and rid > 0:
-                    stored += 1
-            except Exception as e:
-                logger.debug("excel_line fallback store failed: %s", e)
         return stored
 
     @staticmethod
@@ -639,14 +622,36 @@ class ExcelLineProvider(MemoryProvider):
         })
 
 
-def _ask_free_model(prompt: str, model: str) -> str:
-    """Call a free Hermes model in-process to classify a record."""
+def _ask_free_model(prompt: str, model: str, llm=None) -> str:
+    """Call a host-owned model in-process to classify a record.
+
+    Returns "" when NO LLM is available. Callers must treat "" as a retryable
+    failure (keep the log for a later pass) — previously this returned fake
+    JSON, which made the worker believe classification succeeded and polluted
+    the store with raw prompt/user-turn echoes (2026-09 audit: 5.8k junk rows).
+    """
+    # Preferred: the host's PluginLlm facade (ctx.llm), bound at register().
+    if llm is not None:
+        msgs = [{"role": "user", "content": prompt}]
+        try:
+            res = llm.complete(messages=msgs, model=model or None,
+                               purpose="excel_line-classify")
+            return (getattr(res, "text", "") or "").strip()
+        except PermissionError:
+            # Trust gate rejected the model override — retry with host default.
+            try:
+                res = llm.complete(messages=msgs, purpose="excel_line-classify")
+                return (getattr(res, "text", "") or "").strip()
+            except Exception:
+                return ""
+        except Exception:
+            return ""
+    # Legacy one-shot helper (existed in older runtimes; gone from core).
     try:
-        from agent.run_agent import quick_completion
-        return quick_completion(prompt, model=model) or ""
+        from agent.run_agent import quick_completion  # type: ignore
+        return (quick_completion(prompt, model=model) or "").strip()
     except Exception:
-        return json.dumps({"zone": "knowledge", "brief": prompt[:80],
-                           "title": "", "content": "", "tags": ""})
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -655,5 +660,5 @@ def _ask_free_model(prompt: str, model: str) -> str:
 
 def register(ctx) -> None:
     config = _load_plugin_config()
-    provider = ExcelLineProvider(config=config)
+    provider = ExcelLineProvider(config=config, llm=getattr(ctx, "llm", None))
     ctx.register_memory_provider(provider)

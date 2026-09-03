@@ -377,7 +377,7 @@ def test_lazy_index_and_raw_backup():
     # make indexer produce a usable record by overriding the free-model fn
     # on the registered plugin module (the one _drain_pending_logs uses)
     import sys as _sys
-    _sys.modules["excel_line_plugin"]._ask_free_model = lambda p, model="x": json.dumps(
+    _sys.modules["excel_line_plugin"]._ask_free_model = lambda p, model="x", llm=None: json.dumps(
         {"zone": "knowledge", "brief": "Honda purchase noted",
          "title": "honda", "content": "user bought Honda", "tags": "k"})
     # prefetch should NOT drain (Gemini review #4) — it only searches existing index.
@@ -389,21 +389,29 @@ def test_lazy_index_and_raw_backup():
     res = p.prefetch("Honda", session_id="qa")
     check("prefetch finds indexed memory after background drain", "Honda" in res, res[:120])
 
-    # 2) on_session_end must not lose data when the LLM fails to classify:
-    #    _auto_extract's _fallback_store persists raw turns into the store.
+    # 2) on_session_end must not LOSE data when the LLM fails to classify:
+    #    _auto_extract now refuses to pollute the store with raw turns
+    #    (2026-09 pollution audit); instead the transcript is kept as a
+    #    session_raw_ log for a future classified pass.
     logd2 = tempfile.mkdtemp(); root2 = tempfile.mkdtemp()
     p2 = xl.ExcelLineProvider({"root": root2, "log_dir": logd2})
     p2._root = root2; p2._log_dir = logd2
     p2._store = ExcelLineStore(root2); p2._session_id = "qa2"
-    _sys.modules["excel_line_plugin"]._ask_free_model = lambda p, model="x": "not json"  # force classify fail
+    _sys.modules["excel_line_plugin"]._ask_free_model = lambda p, model="x", llm=None: "not json"  # force classify fail
     msgs = [{"role": "user", "content": "remember seagift format 2026"},
             {"role": "assistant", "content": "ok"}]
     p2.on_session_end(msgs)
-    # data must survive via _fallback_store (stored into the knowledge zone)
+    # store must stay CLEAN (no raw-turn junk) ...
     rows = p2._store.read_zone(p2._store.zone_path("knowledge"), limit=10)
-    survived = any("seagift" in (r.get("content") or "") for r in rows)
-    check("on_session_end keeps data when LLM fails (fallback store)", survived,
+    clean = not any("seagift" in (r.get("content") or "") for r in rows)
+    # ... and the data must survive as a raw transcript log for later
+    import glob as _glob
+    raw_logs = [f for f in _glob.glob(os.path.join(logd2, "session_raw_*"))]
+    survived = bool(raw_logs) and any(
+        "seagift" in open(f, encoding="utf-8").read() for f in raw_logs)
+    check("on_session_end: no store pollution when LLM garbage", clean,
           str([r.get("content") for r in rows][:3]))
+    check("on_session_end keeps data in session_raw log (retryable)", survived)
 
 
 def test_formula_injection_safe():

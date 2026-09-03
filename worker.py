@@ -42,26 +42,44 @@ Reply with strict JSON only:
 
 
 def _classify(entry: Dict, free_model_fn, zones: List[str]) -> Optional[Dict]:
-    """Call the free-model function and parse JSON. Returns dict or None."""
+    """Call the free-model function and parse JSON.
+
+    Returns:
+      dict   -> classification succeeded
+      None   -> the LLM responded but output was unusable (retry-worthy once,
+                then fall back to raw backup)
+      "DOWN" sentinel is communicated via the wrapper returning "" — see
+      _classify_tristate below; kept compatible for existing tests.
+    """
+    return _classify_tristate(entry, free_model_fn, zones)[1]
+
+
+def _classify_tristate(entry: Dict, free_model_fn, zones: List[str]):
+    """Returns (status, parsed) where status is one of:
+    'ok'      -> parsed dict
+    'garbage' -> LLM answered but output invalid JSON / bad zone
+    'down'    -> free_model_fn returned empty (no LLM available at all)
+    """
     prompt = _CLASSIFY_PROMPT.format(zones=", ".join(zones)) + \
         "\n\nRECORD:\n" + json.dumps(entry, ensure_ascii=False)[:3000]
     try:
         raw = free_model_fn(prompt)
-        # tolerate fenced json
-        raw = raw.strip()
+    except Exception:
+        return "down", None
+    raw = (raw or "").strip()
+    if not raw:
+        return "down", None
+    try:
         if raw.startswith("```"):
             raw = raw.strip("`")
             raw = raw[raw.find("{") : raw.rfind("}") + 1]
         data = json.loads(raw)
-        # Validate zone membership (ChatGPT review WARN): the LLM may return a
-        # zone that is not in the whitelist; reject it so we fall back to the
-        # raw-text backup instead of creating an arbitrary .xlsx.
         z = str(data.get("zone", "")).strip().lower()
         if z and z not in [s.lower() for s in zones]:
-            return None
-        return data
+            return "garbage", None
+        return "ok", data
     except Exception:
-        return None
+        return "garbage", None
 
 
 def process_logs(log_dir: str, store_root: str, free_model_fn,
@@ -115,6 +133,7 @@ def process_logs(log_dir: str, store_root: str, free_model_fn,
             continue
         stored_any = False
         failed_records = []  # records that did NOT persist (for safe retry)
+        classifier_down = False
         for rec in records:
             # B3 (r8): malformed JSON lines are kept as {"_raw", "_malformed":True}
             # by _read_records. They can never be classified or backed up (no
@@ -124,8 +143,16 @@ def process_logs(log_dir: str, store_root: str, free_model_fn,
             if rec.get("_malformed"):
                 failed_records.append(rec)
                 continue
-            cls = _classify(rec, free_model_fn, zones)
-            if cls:
+            status, cls = _classify_tristate(rec, free_model_fn, zones)
+            if status == "down":
+                # LLM unavailable: NEVER write raw prompt/turn echoes to the
+                # store (2026-09 audit: that fallback polluted 5.8k junk rows).
+                # Keep the log for retry on a later pass; stop processing more
+                # records in this file to avoid hammering a dead endpoint.
+                classifier_down = True
+                failed_records.append(rec)
+                continue
+            if status == "ok" and cls:
                 rid = store.add(
                     zone=cls.get("zone", "knowledge"),
                     brief=cls.get("brief", "")[:120],
@@ -143,21 +170,20 @@ def process_logs(log_dir: str, store_root: str, free_model_fn,
                 else:
                     failed_records.append(rec)
             else:
-                # Classifier unavailable: fall back to a raw-text backup so the
-                # memory is NEVER silently dropped (mirrors provider.on_session_end).
-                raw = " ".join(str(rec.get(k, "")) for k in ("input", "output", "ts"))[:300]
+                # LLM answered but output was garbage: ONE raw backup so the
+                # knowledge is not lost (it is genuine fallback, not a down
+                # classifier echoing prompts). Marked for human triage.
+                raw = " ".join(str(rec.get(k, "")) for k in ("input", "output"))[:300]
                 if len(raw.strip()) >= 10:
                     rid = store.add(zone="knowledge", brief=raw[:120],
                                     content=raw[:300], title="auto-backup",
-                                    tags="auto-backup,llm-unavailable")
+                                    tags="auto-backup,classify-garbage")
                     if rid and rid > 0:
                         count += 1
                         stored_any = True
                     else:
                         failed_records.append(rec)
-                else:
-                    # too short to be meaningful -> skip but do not retry
-                    pass
+                # garbage is not retried (would loop forever on same output)
         # Disposition:
         # - All records persisted  -> safe to delete the log.
         # - Some records failed    -> rewrite ONLY the failed ones back to a fresh
