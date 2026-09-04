@@ -184,6 +184,21 @@ class ExcelLineProvider(MemoryProvider):
         from .brain_store import BrainStore
         self._store = BrainStore(self._root)
         self._session_id = session_id
+        # Auto-restart brain server after gateway restart (port 8766)
+        try:
+            import socket, subprocess, os
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(0.3)
+            try:
+                s.connect(("127.0.0.1", 8766))
+                s.close()  # already running
+            except Exception:
+                s.close()
+                script_dir = os.path.join(os.path.dirname(__file__))
+                server_py = os.path.join(script_dir, "scripts", "brain_server.py")
+                if os.path.exists(server_py):
+                    subprocess.Popen(["python", server_py], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+        except Exception:
+            pass
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [EXCEL_LINE_SCHEMA]
