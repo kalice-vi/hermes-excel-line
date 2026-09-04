@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>🧠 Brain — Mermaid ⇄ excel_line</title>
+<title>🧠 Brain — Mindmap ⇄ excel_line</title>
 <style>
   html, body { margin:0; height:100%; background:transparent; font-family:system-ui,sans-serif; }
   #bar { position:fixed; top:0; left:0; right:0; height:34px; z-index:9; display:flex; align-items:center; gap:8px;
@@ -10,16 +10,24 @@
          background:color-mix(in srgb, var(--card,#fafafa) 90%, transparent); border-bottom:1px solid var(--border,#ddd); }
   #bar button { font-size:12px; padding:3px 9px; border-radius:6px; border:1px solid var(--border,#ccc);
                 background:var(--card,#fff); color:var(--foreground,#222); cursor:pointer; }
+  #bar button:hover { background:color-mix(in srgb, var(--accent,#333) 12%, var(--card,#fff)); }
   #split { position:absolute; top:34px; left:0; right:0; bottom:0; display:flex; }
-  #left  { width:38%; min-width:220px; display:flex; flex-direction:column; border-right:1px solid var(--border,#ccc); }
+  #left  { width:38%; min-width:0; display:flex; flex-direction:column; overflow:hidden; }
+  #left.hidden { display:none; }
   #code  { flex:1; width:100%; box-sizing:border-box; border:0; resize:none; outline:none;
            font:12.5px/1.55 Consolas,'Courier New',monospace; padding:10px 12px;
            background:color-mix(in srgb, var(--card,#fff) 92%, transparent); color:var(--foreground,#111); }
-  #right { flex:1; overflow:auto; }
-  #c { width:100%; height:100%; display:grid; place-items:center; }
+  #dragbar { width:6px; cursor:col-resize; flex:0 0 6px;
+             background:var(--border,#ccc); transition:background .15s; }
+  #dragbar:hover, #dragbar.active { background:var(--accent,#666); }
+  #right { flex:1; overflow:auto; position:relative; }
+  #c     { width:100%; min-height:100%; display:grid; place-items:center; padding:20px; box-sizing:border-box; }
   #c svg { max-width:none; }
   #status { margin-left:auto; white-space:nowrap; }
   #dirty { color:#b45309; display:none; }
+  .hint  { position:fixed; right:12px; bottom:10px; z-index:5; font-size:11px; color:var(--muted-foreground,#888);
+           background:color-mix(in srgb, var(--card,#fff) 85%, transparent); padding:2px 8px; border-radius:6px;
+           border:1px solid var(--border,#ddd); pointer-events:none; }
 </style>
 </head>
 <body>
@@ -27,67 +35,64 @@
   <button id="b_apply">⚡ Apply to Excel</button>
   <button id="b_fmt">🧹 Reformat</button>
   <button id="b_expand">⊞ Expand all</button>
-  <button id="b_reload">↻ Reload from Excel</button>
+  <button id="b_panel">◧ Panel</button>
+  <button id="b_reload">↻ Reload</button>
   <span id="dirty">● unsaved</span>
   <span id="status">loading…</span>
 </div>
 <div id="split">
   <div id="left"><textarea id="code" spellcheck="false"></textarea></div>
-  <div id="right"><div id="c"></div></div>
+  <div id="dragbar" title="Drag to resize"></div>
+  <div id="right">
+    <div id="c"></div>
+    <div class="hint">click node = expand/collapse · drag bar = resize panel</div>
+  </div>
 </div>
-<script src="mermaid/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <script>
-// CDN fallback when the local bundle is not vendored next to this page
+// Local vendored fallback if cdn.jsdelivr is offline inside iframe
 if (typeof mermaid === 'undefined') {
-  document.write('<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"><\/script>');
+  document.write('<script src="mermaid/mermaid.min.js"><\/script>');
 }
 </script>
 <script>
 function boot() {
-mermaid.initialize({ startOnLoad: false, theme: 'neutral',
-  mindmap: { padding: 12 }, securityLevel: 'loose' });
+  if (typeof mermaid === 'undefined') return false;
+  mermaid.initialize({ startOnLoad: false, theme: 'neutral',
+    mindmap: { padding: 14 }, securityLevel: 'loose' });
+  return true;
+}
 
 const code = document.getElementById('code'), status = document.getElementById('status');
 const dirtyMark = document.getElementById('dirty');
-let rev = null, syncing = false, applyTimer = null;
+let rev = null, syncing = false, applyTimer = null, lastSentText = '';
 
 function setStatus(t) { status.textContent = t; }
-
-function skeleton(txt) {
-  // keep mindmap/root/📁 and the first 8 📄 per branch (frame-only view)
-  const lines = txt.split('\n');
-  const out = []; let perTag = {};
-  for (const l of lines) {
-    const s = l.trim();
-    if (!s) continue;
-    if (!s.startsWith('📄') && !s.startsWith('🔗')) { out.push(l); if (s.startsWith('📁')) { perTag[s] = 0; } continue; }
-    if (s.startsWith('🔗')) continue;
-    const lastTag = [...out].reverse().find(x => x.trim().startsWith('📁'));
-    if (lastTag && (perTag[lastTag.trim()] = (perTag[lastTag.trim()] || 0) + 1) <= 8) out.push(l);
-  }
-  return out.join('\n');
-}
+function isDirty() { return code.value !== lastSentText; }
+function setDirty(on) { dirtyMark.style.display = on ? 'inline' : 'none'; }
 
 async function fetchMmd() {
   const r = await fetch('/api/mmd?ts=' + Date.now());
   return r.json();
 }
 
-function isDirty() { return code.value !== lastSentText; }
-let lastSentText = '';
-function setDirty(on) { dirtyMark.style.display = on ? 'inline' : 'none'; }
-
 function render(txt) {
   const c = document.getElementById('c');
-  c.innerHTML = '';
-  const memCount = (txt.match(/📄/g) || []).length;
-  const show = memCount > 1500 ? skeleton(txt) : txt;
-  if (memCount > 1500) {
-    setStatus(`⚠ ${memCount} memories — frame + first 8 per branch (cap 1500)`);
+  if (typeof mermaid === 'undefined') {
+    c.innerHTML = '<pre style="padding:16px;color:#b91c1c">⚠ mermaid.js not loaded. Editing still works via text panel.</pre>';
+    return;
   }
-  mermaid.render('mm', show).then(({svg}) => { c.innerHTML = svg; })
-    .catch(err => { c.innerHTML = '<pre style="padding:14px;color:#b91c1c">⚠ syntax: ' +
-      String(err.message || err).slice(0, 300) + '</pre>'; });
+  c.innerHTML = '';
+  mermaid.render('mm_' + Date.now(), txt).then(({svg}) => {
+    c.innerHTML = svg;
+    // enable interactive click-to-toggle on mermaid mindmap node elements
+    c.querySelectorAll('.mindmap-node, g[class*="node"]').forEach(el => {
+      el.style.cursor = 'pointer';
+    });
+  }).catch(err => {
+    c.innerHTML = '<pre style="padding:14px;color:#b91c1c">⚠ syntax: ' +
+      String(err.message || err).slice(0, 300) + '</pre>';
+  });
 }
 
 async function refresh(force) {
@@ -96,12 +101,7 @@ async function refresh(force) {
     if (!j.rev) return;
     if (j.rev !== rev && !syncing) {
       rev = j.rev;
-      // agent/core changed Excel: overwrite editor unless user is mid-edit
-      if (force || !isDirty()) {
-        code.value = j.mmd;
-        setDirty(false);
-        lastSentText = j.mmd;
-      }
+      if (force || !isDirty()) { code.value = j.mmd; lastSentText = j.mmd; setDirty(false); }
       setStatus('✓ excel_line ' + new Date().toLocaleTimeString());
     }
     render(code.value);
@@ -112,7 +112,6 @@ code.addEventListener('input', () => {
   const on = code.value !== lastSentText;
   setDirty(on);
   clearTimeout(applyTimer);
-  // debounce: 1.2s after typing stops -> re-render, auto-apply valid structure
   applyTimer = setTimeout(() => {
     render(code.value);
     if (code.value.trim() !== lastSentText.trim()) applyNow();
@@ -128,42 +127,49 @@ async function applyNow() {
       body: JSON.stringify({ mmd: code.value }) });
     const j = await r.json();
     if (j.error) { setStatus('⚠ ' + j.error); return; }
-    if (j.results && j.results.some(x => x.error)) {
-      setStatus('⚠ some ops failed: ' + j.results.filter(x=>x.error).map(x=>x.error).join(' | '));
-    }
-    // server returns the CANONICAL text rebuilt from Excel (real ids, format)
-    code.value = j.mmd;
-    lastSentText = j.mmd;
-    setDirty(false);
+    code.value = j.mmd; lastSentText = j.mmd; setDirty(false);
     syncing = false;
     render(j.mmd);
-    if (!j.results || !j.results.some(x => x.error))
-      setStatus('✓ ' + (j.applied || 0) + ' change(s) written ' + new Date().toLocaleTimeString());
+    setStatus('✓ ' + (j.applied || 0) + ' change(s) written ' + new Date().toLocaleTimeString());
   } catch (e) { setStatus('⚠ error: ' + e); }
   finally { syncing = false; }
 }
 
 document.getElementById('b_apply').onclick = applyNow;
-document.getElementById('b_fmt').onclick = () => { refresh(true); setStatus('🧹 reformatted from Excel'); };
+document.getElementById('b_fmt').onclick = () => { lastSentText=''; refresh(true); setStatus('🧹 reformatted'); };
 document.getElementById('b_reload').onclick = () => { lastSentText = ''; refresh(true); };
 document.getElementById('b_expand').onclick = () => {
-  document.querySelectorAll('#c [class*=button], #c .node-circle, #c .mindmap-node--circle')
-    .forEach(e => e.dispatchEvent(new MouseEvent('click', {bubbles: true})));
+  document.querySelectorAll('#c [class*=button], #c .node-circle, #c .mindmap-node').forEach(e => {
+    e.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+  });
+};
+document.getElementById('b_panel').onclick = () => {
+  const L = document.getElementById('left'), D = document.getElementById('dragbar');
+  L.classList.toggle('hidden');
+  D.style.display = L.classList.contains('hidden') ? 'none' : '';
 };
 
+// ---- draggable splitter ----------------------------------------------------
+(() => {
+  const bar = document.getElementById('dragbar'), left = document.getElementById('left');
+  let dragging = false;
+  bar.addEventListener('mousedown', e => { dragging = true; bar.classList.add('active'); e.preventDefault(); });
+  window.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const w = Math.min(Math.max(e.clientX, 120), window.innerWidth - 200);
+    left.style.width = w + 'px';
+  });
+  window.addEventListener('mouseup', () => { dragging = false; bar.classList.remove('active'); });
+})();
+
 (async () => {
+  boot();
   const j = await fetchMmd();
   rev = j.rev; code.value = j.mmd; lastSentText = j.mmd;
   render(j.mmd);
   setStatus('✓ excel_line · ' + (j.mmd.match(/📄/g) || []).length + ' memories');
 })();
-setInterval(() => refresh(false), 2000);  // agent writes Excel → pane updates live
-}
-// wait for the CDN fallback script to arrive if it was injected
-if (typeof mermaid !== 'undefined') boot();
-else {
-  const iv = setInterval(() => { if (typeof mermaid !== 'undefined') { clearInterval(iv); boot(); } }, 150);
-}
+setInterval(() => refresh(false), 2000);
 </script>
 </body>
 </html>
