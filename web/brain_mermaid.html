@@ -24,12 +24,12 @@
 </head>
 <body>
 <div id="bar">
-  <button id="b_apply">⚡ Áp dụng vào Excel</button>
-  <button id="b_fmt">🧹 Format lại</button>
-  <button id="b_expand">⊞ Mở hết</button>
-  <button id="b_reload">↻ Tải từ Excel</button>
-  <span id="dirty">● chưa áp dụng</span>
-  <span id="status">đang tải…</span>
+  <button id="b_apply">⚡ Apply to Excel</button>
+  <button id="b_fmt">🧹 Reformat</button>
+  <button id="b_expand">⊞ Expand all</button>
+  <button id="b_reload">↻ Reload from Excel</button>
+  <span id="dirty">● unsaved</span>
+  <span id="status">loading…</span>
 </div>
 <div id="split">
   <div id="left"><textarea id="code" spellcheck="false"></textarea></div>
@@ -37,28 +37,32 @@
 </div>
 <script src="mermaid/mermaid.min.js"></script>
 <script>
+// CDN fallback when the local bundle is not vendored next to this page
+if (typeof mermaid === 'undefined') {
+  document.write('<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"><\/script>');
+}
+</script>
+<script>
+function boot() {
 mermaid.initialize({ startOnLoad: false, theme: 'neutral',
   mindmap: { padding: 12 }, securityLevel: 'loose' });
 
 const code = document.getElementById('code'), status = document.getElementById('status');
 const dirtyMark = document.getElementById('dirty');
-let rev = null, lastSentRev = null, syncing = false, applyTimer = null;
-let fullMmd = null, wantFull = false;
-const RENDER_CAP = 1500;   // trên số memory này -> chỉ vẽ khung zone/tag
+let rev = null, syncing = false, applyTimer = null;
 
 function setStatus(t) { status.textContent = t; }
 
 function skeleton(txt) {
-  // giữ mindmap/root/📁/🏷 và tối đa 15 memory đầu mỗi tag để xem mẫu
-  const lines = txt.splitlines ? txt.split('\n') : txt.split('\n');
+  // keep mindmap/root/📁 and the first 8 📄 per branch (frame-only view)
+  const lines = txt.split('\n');
   const out = []; let perTag = {};
   for (const l of lines) {
     const s = l.trim();
     if (!s) continue;
-    const indent = l.length - l.length + (l.match(/^\s*/)[0] || '').length;
-    if (!s.startsWith('📄') && !s.startsWith('🔗')) { out.push(l); if (s.startsWith('🏷')) { perTag[s] = 0; } continue; }
+    if (!s.startsWith('📄') && !s.startsWith('🔗')) { out.push(l); if (s.startsWith('📁')) { perTag[s] = 0; } continue; }
     if (s.startsWith('🔗')) continue;
-    const lastTag = [...out].reverse().find(x => x.trim().startsWith('🏷'));
+    const lastTag = [...out].reverse().find(x => x.trim().startsWith('📁'));
     if (lastTag && (perTag[lastTag.trim()] = (perTag[lastTag.trim()] || 0) + 1) <= 8) out.push(l);
   }
   return out.join('\n');
@@ -69,46 +73,46 @@ async function fetchMmd() {
   return r.json();
 }
 
+function isDirty() { return code.value !== lastSentText; }
+let lastSentText = '';
+function setDirty(on) { dirtyMark.style.display = on ? 'inline' : 'none'; }
+
+function render(txt) {
+  const c = document.getElementById('c');
+  c.innerHTML = '';
+  const memCount = (txt.match(/📄/g) || []).length;
+  const show = memCount > 1500 ? skeleton(txt) : txt;
+  if (memCount > 1500) {
+    setStatus(`⚠ ${memCount} memories — frame + first 8 per branch (cap 1500)`);
+  }
+  mermaid.render('mm', show).then(({svg}) => { c.innerHTML = svg; })
+    .catch(err => { c.innerHTML = '<pre style="padding:14px;color:#b91c1c">⚠ syntax: ' +
+      String(err.message || err).slice(0, 300) + '</pre>'; });
+}
+
 async function refresh(force) {
   try {
     const j = await fetchMmd();
     if (!j.rev) return;
     if (j.rev !== rev && !syncing) {
       rev = j.rev;
-      // agent/core vừa đổi Excel: ghi đè editor nếu user chưa sửa dở
+      // agent/core changed Excel: overwrite editor unless user is mid-edit
       if (force || !isDirty()) {
         code.value = j.mmd;
         setDirty(false);
-        lastSentRev = rev;
+        lastSentText = j.mmd;
       }
       setStatus('✓ excel_line ' + new Date().toLocaleTimeString());
     }
-    render(j.mmd !== undefined && code.value === j.mmd ? j.mmd : code.value);
+    render(code.value);
   } catch (e) { setStatus('⚠ ' + e); }
 }
-
-function render(txt) {
-  const c = document.getElementById('c');
-  c.innerHTML = '';
-  const memCount = (txt.match(/📄/g) || []).length;
-  const show = memCount > RENDER_CAP ? skeleton(txt) : txt;
-  if (memCount > RENDER_CAP) {
-    setStatus(`⚠ ${memCount} memories — render khung zone/tag + 8 memory/tag (giới hạn ${RENDER_CAP})`);
-  }
-  mermaid.render('mm', show).then(({svg}) => { c.innerHTML = svg; })
-    .catch(err => { c.innerHTML = '<pre style="padding:14px;color:#b91c1c">⚠ cú pháp: ' +
-      String(err.message || err).slice(0, 300) + '</pre>'; });
-}
-
-function isDirty() { return code.value !== lastSentText; }
-let lastSentText = '';
-function setDirty(on) { dirtyMark.style.display = on ? 'inline' : 'none'; }
 
 code.addEventListener('input', () => {
   const on = code.value !== lastSentText;
   setDirty(on);
   clearTimeout(applyTimer);
-  // debounce: 1.2s sau khi ngừng gõ -> render thử, và nếu có cấu trúc hợp lệ thì tự áp
+  // debounce: 1.2s after typing stops -> re-render, auto-apply valid structure
   applyTimer = setTimeout(() => {
     render(code.value);
     if (code.value.trim() !== lastSentText.trim()) applyNow();
@@ -117,29 +121,34 @@ code.addEventListener('input', () => {
 
 async function applyNow() {
   if (syncing || code.value === lastSentText) return;
-  syncing = true; setStatus('⋯ đang ghi Excel…');
+  syncing = true; setStatus('⋯ writing Excel…');
   try {
     const r = await fetch('/api/mmd_sync', { method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ mmd: code.value }) });
     const j = await r.json();
     if (j.error) { setStatus('⚠ ' + j.error); return; }
-    // server trả về văn bản CHUẨN HÓA từ Excel (map-added id thật, format đúng)
+    if (j.results && j.results.some(x => x.error)) {
+      setStatus('⚠ some ops failed: ' + j.results.filter(x=>x.error).map(x=>x.error).join(' | '));
+    }
+    // server returns the CANONICAL text rebuilt from Excel (real ids, format)
     code.value = j.mmd;
     lastSentText = j.mmd;
     setDirty(false);
     syncing = false;
     render(j.mmd);
-    setStatus('✓ ' + (j.applied || 0) + ' thay đổi đã ghi Excel ' + new Date().toLocaleTimeString());
-  } catch (e) { setStatus('⚠ lỗi: ' + e); }
+    if (!j.results || !j.results.some(x => x.error))
+      setStatus('✓ ' + (j.applied || 0) + ' change(s) written ' + new Date().toLocaleTimeString());
+  } catch (e) { setStatus('⚠ error: ' + e); }
   finally { syncing = false; }
 }
 
 document.getElementById('b_apply').onclick = applyNow;
-document.getElementById('b_fmt').onclick = () => { refresh(true); setStatus('🧹 đã format từ Excel'); };
+document.getElementById('b_fmt').onclick = () => { refresh(true); setStatus('🧹 reformatted from Excel'); };
 document.getElementById('b_reload').onclick = () => { lastSentText = ''; refresh(true); };
 document.getElementById('b_expand').onclick = () => {
-  document.querySelectorAll('#c [class*=button], #c .node-circle, #c .mindmap-node--circle').forEach(e => e.dispatchEvent(new MouseEvent('click', {bubbles: true})));
+  document.querySelectorAll('#c [class*=button], #c .node-circle, #c .mindmap-node--circle')
+    .forEach(e => e.dispatchEvent(new MouseEvent('click', {bubbles: true})));
 };
 
 (async () => {
@@ -148,7 +157,13 @@ document.getElementById('b_expand').onclick = () => {
   render(j.mmd);
   setStatus('✓ excel_line · ' + (j.mmd.match(/📄/g) || []).length + ' memories');
 })();
-setInterval(() => refresh(false), 2000);  // agent ghi Excel → pane cập nhật
+setInterval(() => refresh(false), 2000);  // agent writes Excel → pane updates live
+}
+// wait for the CDN fallback script to arrive if it was injected
+if (typeof mermaid !== 'undefined') boot();
+else {
+  const iv = setInterval(() => { if (typeof mermaid !== 'undefined') { clearInterval(iv); boot(); } }, 150);
+}
 </script>
 </body>
 </html>

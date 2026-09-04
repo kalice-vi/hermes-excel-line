@@ -108,6 +108,23 @@ class BrainStore(ExcelLineStore):
     def next_id() -> int:
         pass  # inherited from base class via self._next_seq()
 
+    def _tree_max_id(self) -> int:
+        m = 0
+        def walk(b):
+            nonlocal m
+            try:
+                rows = self.load_rows(b)
+            except (BadBranch, Exception):
+                return
+            for r in rows:
+                if r["id"] > m:
+                    m = r["id"]
+                rb = str(r.get("branch") or "")
+                if rb.lower().endswith(".xlsx"):
+                    walk(rb)
+        walk(MASTER_V2)
+        return m
+
     def _next_id(self) -> int:
         seq_file = os.path.join(self._root, ".id_seq")
         val = 0
@@ -117,6 +134,10 @@ class BrainStore(ExcelLineStore):
                     val = int(f.read().strip() or "0")
             except Exception:
                 val = 0
+        # NEVER let a recovered/reset counter collide with existing ids:
+        floor = self._tree_max_id()
+        if val < floor:
+            val = floor
         val += 1
         with open(seq_file, "w", encoding="utf-8") as f:
             f.write(str(val))

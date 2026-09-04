@@ -1,168 +1,125 @@
-"""brain_server.py — server mind-map đồng bộ 2 chiều THẲNG vào excel_line.
+"""brain_server.py — live mind-map server, two-way synced with the excel_line v2 tree.
 
-- GET  /api/data     : render cây mới nhất từ Excel (không qua cache file)
-- GET  /api/search   : ?q=... tìm theo brief/tag/id
-- POST /api/ops      : [{op...}, ...] áp trực tiếp vào ExcelLineStore (có lock)
-- tĩnh               : phục vụ editor.html + js/css
+Endpoints:
+  GET  /api/data     : jsMind tree rendered straight from Excel (no cache)
+  GET  /api/search   : ?q=... keyword search across the whole tree
+  GET  /api/mmd      : mermaid .mmd source + revision hash (client change detect)
+  POST /api/mmd_sync : {mmd: edited text} -> diff vs Excel -> apply ops -> canonical mmd
+  POST /api/ops      : [ {op...}, ... ] applied directly through BrainStore (locked)
+  static             : serves web/ assets (editor html + mermaid lib)
 
-Ngôn ngữ chung: xem brain_map.py. Ops được thiết kế idempotent-ish và
-CHỈ đi qua store — không bao giờ sửa .xlsx bằng đường vòng.
-
-Memory do user tạo trên map mang tag 'map-added' để agent nhận diện
-(không tự xử lý/làm lại phần user đã gõ).
+Excel is the single source of truth: every write goes through BrainStore —
+the server never touches .xlsx files by a side path. User-created map
+memories carry the tag 'map-added' so the agent curator leaves them alone.
 """
 from __future__ import annotations
 import json, os, sys, threading, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)  # brain_map
-STATIC = r"C:\Users\Admin\AppData\Local\Temp\mindmap"
-PLUGIN = r"C:\Users\Admin\AppData\Local\hermes\plugins\excel_line"
+HERE = os.path.dirname(os.path.abspath(__file__))            # .../scripts
+PLUGIN = os.path.dirname(HERE)                               # .../excel_line (plugin root)
+STATIC = os.path.join(PLUGIN, "web")
 sys.path.insert(0, PLUGIN)
 
-from brain_map import build_tree, topic_of  # noqa: E402
-from mermaid_map import build_mmd, diff_ops  # noqa: E402
-from store import ExcelLineStore, ZONE_DEFAULTS  # noqa: E402
-from openpyxl import load_workbook  # noqa: E402
+from brain_store import BrainStore, FullError, BadBranch, MASTER_V2  # noqa: E402
+from brain_map import build_tree                                  # noqa: E402
+from mermaid_map import build_mmd, diff_ops                       # noqa: E402
 
-ROOT = os.environ.get("EXCEL_LINE_ROOT", HERE)
-store = ExcelLineStore(ROOT)
+ROOT = os.environ.get("EXCEL_LINE_ROOT",
+                      os.path.join(os.path.expanduser("~"),
+                                   "AppData", "Local", "hermes", "excel_line"))
+store = BrainStore(ROOT)
 _lock = threading.Lock()
-
-# ------------------------------------------------------------------ helpers
-
-def zone_of(rid: int):
-    """Tìm (zone, row) trong master index theo id."""
-    wb = load_workbook(store._master, read_only=True, data_only=True)
-    try:
-        for r in wb["index"].iter_rows(min_row=2, values_only=True):
-            if r and r[0] == rid:
-                return {"zone": str(r[1]), "brief": str(r[2] or ""),
-                        "title": str(r[3] or ""), "tags": str(r[5] or "")}
-    finally:
-        wb.close()
-    return None
-
-def content_of(rid: int, zone: str) -> str:
-    p = store.zone_path(zone)
-    if not os.path.exists(p):
-        return ""
-    wb = load_workbook(p, read_only=True, data_only=True)
-    try:
-        for r in wb["mem"].iter_rows(min_row=2, values_only=True):
-            if r and r[0] == rid:
-                return str(r[2] or "")
-    finally:
-        wb.close()
-    return ""
-
-def set_refs(rid: int, zone: str, refs):
-    """Ghi/đổi mảng REFS: trong content (zone workbook) qua store.update."""
-    content = content_of(rid, zone)
-    import re
-    line = "REFS: " + "; ".join(refs) if refs else None
-    if re.search(r"REFS:.+", content):
-        new = re.sub(r"REFS:.+", line or "REFS:", content)
-    else:
-        new = (content + ("\n" if content else "") + line) if line else content
-    return store.update(zone, rid, content=new)
 
 # ------------------------------------------------------------------ ops
 
 def op_add(o):
-    zone = o.get("zone") or "knowledge"
-    if zone not in ZONE_DEFAULTS:
-        return f"zone '{zone}' không hợp lệ"
-    topic = (o.get("topic") or "New").strip()[:120]
-    tags = "map-added" + ("," + topic_of(o.get("tag")) if o.get("tag") else "")
-    mid = store.add(zone, brief=topic, content=topic, title=topic, tags=tags)
-    return {"id": mid} if mid > 0 else "store.add trả -1"
+    branch = o.get("branch") or MASTER_V2
+    topic = (o.get("topic") or "New").strip()[:50]
+    tags = "map-added" + ("," + str(o.get("tag")).strip() if o.get("tag") else "")
+    try:
+        mid = store.add(branch, title=topic, content=topic, tags=tags)
+    except FullError as e:
+        return {"error": str(e) + " — merge rows on the map or drag them to another branch"}
+    except BadBranch as e:
+        return {"error": str(e)}
+    return {"id": mid} if mid and mid > 0 else {"error": "store.add failed"}
 
 def op_rename(o):
-    rid = int(o["id"]); z = zone_of(rid)
-    if not z: return "không tìm thấy #" + str(rid)
-    ok = store.update(z["zone"], rid, brief=o["topic"], title=o["topic"][:40])
-    return {"ok": ok} if ok else "update thất bại"
+    rid = int(o["id"])
+    f = store.find(rid)
+    if not f:
+        return {"error": "not found: #" + str(rid)}
+    ok = store.set(f["branch"], rid, title=(o.get("topic") or "").strip()[:50])
+    return {"ok": ok} if ok else {"error": "update failed"}
 
 def op_retag(o):
-    rid = int(o["id"]); z = zone_of(rid)
-    if not z: return "không tìm thấy #" + str(rid)
-    tags = "map-added," + (o.get("tag") or "").strip() if "map-added" in z["tags"] else (o.get("tag") or "").strip()
-    ok = store.update(z["zone"], rid, tags=tags)
-    return {"ok": ok} if ok else "update thất bại"
+    rid = int(o["id"])
+    f = store.find(rid)
+    if not f:
+        return {"error": "not found: #" + str(rid)}
+    old = str(f["row"].get("tags") or "")
+    base = [t for t in old.split(",") if t.strip() and t.strip() != "map-added"]
+    new_tag = (o.get("tag") or "").strip()
+    tags = ",".join((["map-added"] if "map-added" in old else []) +
+                    ([new_tag] if new_tag else base))
+    ok = store.set(f["branch"], rid, tags=tags)
+    return {"ok": ok} if ok else {"error": "update failed"}
 
 def op_move(o):
-    """Đổi zone (kéo memory sang nhánh zone khác) hoặc đổi tag (kéo sang topic)."""
-    rid = int(o["id"]); z = zone_of(rid)
-    if not z: return "không tìm thấy #" + str(rid)
-    new_zone = o.get("zone"); new_tag = o.get("tag")
-    if new_zone and new_zone in ZONE_DEFAULTS:
-        # add dòng zone mới + xóa dòng zone cũ (giữ nội dung)
-        content = content_of(rid, z["zone"])
-        mid2 = store.add(new_zone, brief=z["brief"], content=content,
-                         title=z["title"], tags=z["tags"])
-        if mid2 > 0:
-            store.delete(z["zone"], rid)
-            return {"moved": True, "new_id": mid2}
-        return "add zone mới thất bại"
-    if new_tag is not None:
-        old = [t.strip() for t in z["tags"].split(",") if t.strip()]
-        keep = [t for t in old if t.startswith("map-added")]
-        newtags = ",".join(keep + ([new_tag] if new_tag else []))
-        ok = store.update(z["zone"], rid, tags=newtags)
-        return {"ok": ok} if ok else "update tags thất bại"
-    return "thiếu zone/tag"
+    """Move a memory row between branch workbooks (drag on the map)."""
+    rid = int(o["id"])
+    src = o.get("src"); dst = o.get("dst") or MASTER_V2
+    f = store.find(rid)
+    if not f:
+        return {"error": "not found: #" + str(rid)}
+    src = src or f["branch"]
+    if src == dst:
+        return {"ok": True, "noop": True}
+    r = f["row"]
+    try:
+        n = store.add(dst, title=r["title"], content=r["content"],
+                      tags=r["tags"], link=r.get("branch") or "")
+    except FullError as e:
+        return {"error": str(e)}
+    except BadBranch as e:
+        return {"error": str(e)}
+    store.rm(src, rid)
+    return {"moved": True, "new_id": n}
 
 def op_delete(o):
-    rid = int(o["id"]); z = zone_of(rid)
-    if not z: return "không tìm thấy #" + str(rid)
-    ok = store.delete(z["zone"], rid)
-    return {"ok": ok} if ok else "delete thất bại"
+    rid = int(o["id"])
+    f = store.find(rid)
+    if not f:
+        return {"error": "not found: #" + str(rid)}
+    ok = store.rm(f["branch"], rid)
+    return {"ok": ok} if ok else {"error": "delete failed"}
 
-def op_addref(o):
-    rid = int(o["id"]); z = zone_of(rid)
-    if not z: return "không tìm thấy #" + str(rid)
-    path = (o.get("path") or "").strip()
-    if not path: return "thiếu path"
-    refs = []
-    import re
-    m = re.search(r"REFS:(.+)", content_of(rid, z["zone"]))
-    if m:
-        refs = [x.strip() for x in m.group(1).split(";") if x.strip()]
-    if path in refs:
-        return {"ok": True, "exists": True}
-    refs.append(path)
-    ok = set_refs(rid, z["zone"], refs)
-    return {"ok": ok} if ok else "ghi refs thất bại"
-
-def op_delref(o):
-    rid = int(o["id"]); z = zone_of(rid)
-    if not z: return "không tìm thấy #" + str(rid)
-    import re
-    m = re.search(r"REFS:(.+)", content_of(rid, z["zone"]))
-    refs = [x.strip() for x in m.group(1).split(";") if x.strip()] if m else []
-    path = (o.get("path") or "").strip()
-    refs = [r for r in refs if r != path]
-    ok = set_refs(rid, z["zone"], refs)
-    return {"ok": ok} if ok else "xóa refs thất bại"
+def op_child(o):
+    """Create a new sub-branch workbook under a parent branch."""
+    parent = o.get("parent") or MASTER_V2
+    name = (o.get("name") or "branch").strip()
+    try:
+        res = store.child(parent, name,
+                          title=(o.get("topic") or name)[:50])
+    except (FullError, BadBranch) as e:
+        return {"error": str(e)}
+    return res
 
 OPS = {"add": op_add, "rename": op_rename, "retag": op_retag, "move": op_move,
-       "delete": op_delete, "addref": op_addref, "delref": op_delref}
+       "delete": op_delete, "child": op_child}
 
 def apply_ops(ops):
     results = []
     for o in ops:
         fn = OPS.get(o.get("op"))
         if not fn:
-            results.append({"op": o, "error": "op lạ: " + str(o.get("op"))})
+            results.append({"op": o, "error": "unknown op: " + str(o.get("op"))})
             continue
         try:
             r = fn(o)
         except Exception as e:
-            r = f"exception: {e}"
-        if isinstance(r, str):
-            r = {"error": r}
+            r = {"error": f"exception: {e}"}
         results.append({"op": o.get("op"), "id": o.get("id"), **r})
     return results
 
@@ -175,6 +132,7 @@ class H(BaseHTTPRequestHandler):
         data = body.encode("utf-8") if isinstance(body, str) else body
         self.send_response(code)
         self.send_header("Content-Type", ctype + "; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -184,11 +142,8 @@ class H(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         if u.path == "/api/data":
             try:
-                # build_tree đọc read-only, lock do store quản lý khi ghi —
-                # KHÔNG giữ cross-process lock ở đây (non-reentrant, xem mmd_sync)
                 tree = build_tree(ROOT)
-                idx = os.path.join(ROOT, "excel-line_index.xlsx")
-                tree["_rev"] = os.stat(idx).st_mtime if os.path.exists(idx) else 0
+                tree["meta"]["rev"] = store.count()
             except Exception as e:
                 return self._send(500, json.dumps({"error": str(e)}, ensure_ascii=False))
             return self._send(200, json.dumps(tree, ensure_ascii=False))
@@ -197,28 +152,23 @@ class H(BaseHTTPRequestHandler):
             hits = store.search_index(q, limit=50) if q else []
             return self._send(200, json.dumps({"hits": hits}, ensure_ascii=False))
         if u.path == "/api/mmd":
-            # .mmd sinh trực tiếp từ Excel + revision để client phát hiện đổi
             import hashlib
             try:
-                with store._cross_process_lock(timeout=5.0):
-                    mmd = build_mmd(ROOT)
+                mmd = build_mmd(ROOT)
             except Exception as e:
                 return self._send(500, json.dumps({"error": str(e)}, ensure_ascii=False))
             rev = hashlib.md5(mmd.encode("utf-8")).hexdigest()[:12]
             return self._send(200, json.dumps({"rev": rev, "mmd": mmd}, ensure_ascii=False))
-        if u.path == "/api/mmd_sync":
-            pass  # POST only
-        # static (editor + assets) — ưu tiên TEMP/mindmap, fallback thư mục plugin
-        p = u.path.lstrip("/") or "editor.html"
-        for base in (STATIC, HERE):
-            fp = os.path.normpath(os.path.join(base, p))
-            if fp.startswith(base) and os.path.isfile(fp):
-                ctype = {".html": "text/html", ".js": "text/javascript",
-                         ".css": "text/css", ".map": "application/json",
-                         ".mmd": "text/plain"}.get(
-                    os.path.splitext(fp)[1], "application/octet-stream")
-                with open(fp, "rb") as f:
-                    return self._send(200, f.read(), ctype)
+        # static — served from the plugin web/ folder
+        p = u.path.lstrip("/") or "brain_mermaid.html"
+        fp = os.path.normpath(os.path.join(STATIC, p))
+        if fp.startswith(STATIC) and os.path.isfile(fp):
+            ctype = {".html": "text/html", ".js": "text/javascript",
+                     ".css": "text/css", ".map": "application/json",
+                     ".mmd": "text/plain"}.get(
+                os.path.splitext(fp)[1], "application/octet-stream")
+            with open(fp, "rb") as f:
+                return self._send(200, f.read(), ctype)
         return self._send(404, b"not found", "text/plain")
 
     def do_POST(self):
@@ -234,13 +184,10 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send(400, json.dumps({"error": str(e)}, ensure_ascii=False))
         if path == "/api/mmd_sync":
-            # client gửi cả văn bản .mmd đã sửa -> server tự diff với Excel -> ops
             try:
                 n = int(self.headers.get("Content-Length", 0))
                 payload = json.loads(self.rfile.read(n).decode("utf-8"))
                 new_mmd = payload.get("mmd", "")
-                # chỉ giữ _lock của server; KHÔNG giữ cross-process lock ở đây
-                # vì store.add/update/delete sẽ tự lấy lock (nó không reentrant)
                 with _lock:
                     old_mmd = build_mmd(ROOT)
                     ops = diff_ops(old_mmd, new_mmd)
@@ -255,5 +202,5 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.environ.get("BRAIN_PORT", "8766"))
-    print(f"brain server → http://127.0.0.1:{port}/editor.html (root={ROOT})")
+    print(f"brain server → http://127.0.0.1:{port}/brain_mermaid.html (root={ROOT})", flush=True)
     ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()

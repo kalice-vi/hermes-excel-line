@@ -1,162 +1,147 @@
-"""mermaid_map.py — ngôn ngữ chung text giữa excel_line và Mermaid mindmap.
+"""mermaid_map.py — common text language between the excel_line v2 tree and Mermaid.
 
-Quy ước ánh xạ (mỗi dòng .mmd là một node, indent = cấp bậc).
-KHÔNG dùng ( ) [ ] trong text node vì Mermaid đó là cú pháp shape:
+Each .mmd line is one node; indentation = tree depth. Node shapes mirror
+brain_store's invariants:
 
     mindmap
       root((🧠 BRAIN))
-        📁 knowledge 222             <- zone
-          🏷 env 42                   <- tag nhóm
-            📄119 brief...           <- memory (id sát sau 📄)
-              🔗119i0 filename.xlsx  <- ref file
+        📁 skill.xlsx · 2/10          <- branch workbook (usage counter)
+          📄34 Skill title            <- memory row (id glued after 📄)
+          📁 skill/cloud.xlsx · 1/10  <- nested branch
+            📄40 Sub memory
+              🔗40 filename.py        <- leaf-asset pointer of the memory
 
-Chiều Excel -> .mmd : build_mmd(root) — chiếu thuần, format chuẩn hóa.
-Chiều .mmd -> Excel : diff_ops(old,new) — suy ra ops, server ghi qua store.
-Memory user thêm từ pane mang tag 'map-added' (agent không đụng tới).
+Excel -> .mmd : build_mmd(root)    pure projection, normalized formatting.
+.mmd -> Excel : diff_ops(old,new)  infers ops; the server applies them via
+               BrainStore (never touching .xlsx through side paths).
+User-added map memories carry the 'map-added' tag (agent leaves them alone).
 """
 from __future__ import annotations
-import os, re, difflib
-from typing import Dict, List, Tuple
+import os, re, sys
+from typing import Dict, List
 
-from openpyxl import load_workbook
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from brain_store import BrainStore, MASTER_V2, BadBranch
 
-IND = "  "   # 2 space / cấp
+IND = "  "   # two spaces per level
 
 # ---------------------------------------------------------------- Excel -> mmd
 
-def read_index(root: str) -> List[Dict]:
-    p = os.path.join(root, "excel-line_index.xlsx")
-    if not os.path.exists(p):
-        return []
-    wb = load_workbook(p, read_only=True, data_only=True)
-    header = [str(c.value or "").strip().lower() for c in next(wb["index"].iter_rows(max_row=1))]
-    rows = [dict(zip(header, r)) for r in wb["index"].iter_rows(min_row=2, values_only=True)
-            if r and r[0] is not None]
-    wb.close()
-    return rows
-
-def read_refs(root: str, zones) -> Dict[int, List[str]]:
-    out: Dict[int, List[str]] = {}
-    for z in zones:
-        p = os.path.join(root, z + ".xlsx")
-        if not os.path.exists(p):
-            continue
-        try:
-            wb = load_workbook(p, read_only=True, data_only=True)
-            for r in wb["mem"].iter_rows(min_row=2, values_only=True):
-                if r and r[0] is not None:
-                    m = re.search(r"REFS:(.+)", str(r[2] or ""))
-                    if m:
-                        out[int(r[0])] = [x.strip() for x in m.group(1).split(";") if x.strip()]
-            wb.close()
-        except Exception:
-            pass
-    return out
-
-def topic_of(tags) -> str:
-    t = (str(tags or "")).strip()
-    for part in t.split(","):
-        part = part.strip()
-        if part and part != "map-added" and not part.startswith(("memory-md", "env")):
-            return part
-    return "♾ khác"
-
 def _clean(s: str) -> str:
-    """Thoát ký tự phá cú pháp mindmap + gộp về 1 dòng."""
+    """Escape characters that break mermaid mindmap syntax; collapse to one line."""
     s = re.sub(r"\s+", " ", str(s))
     return re.sub(r"[\(\)\[\]{}<>#&`;]", " ", s).strip()
 
+
 def build_mmd(root: str) -> str:
-    rows = read_index(root)
-    refs = read_refs(root, sorted({str(r.get("zone") or "misc") for r in rows}))
-    zones: Dict[str, List[Dict]] = {}
-    for row in rows:
-        zones.setdefault(str(row.get("zone") or "misc"), []).append(row)
-    lines = ["mindmap", f"{IND}root((🧠 BRAIN · {len(rows)} memories))"]
-    for zone, items in sorted(zones.items(), key=lambda kv: -len(kv[1])):
-        lines.append(f"{IND*2}📁 {_clean(zone)} · {len(items)}")
-        topics: Dict[str, List[Dict]] = {}
-        for row in items:
-            topics.setdefault(topic_of(row.get("tags")), []).append(row)
-        for topic, trows in sorted(topics.items(), key=lambda kv: -len(kv[1])):
-            lines.append(f"{IND*3}🏷 {_clean(topic)} · {len(trows)}")
-            for row in trows:
-                rid = int(row["id"])
-                brief = _clean(str(row.get("brief") or ""))[:80]
-                lines.append(f"{IND*4}📄{rid} {brief}")
-                for i, pp in enumerate(refs.get(rid, [])[:12]):
-                    lines.append(f"{IND*5}🔗{rid}i{i} {_clean(os.path.basename(pp))}")
+    store = BrainStore(root)
+    lines = []
+
+    def walk(branch: str, depth: int):
+        try:
+            rows = store.load_rows(branch)
+        except BadBranch:
+            rows = []
+        for r in rows:
+            rid = int(r["id"])
+            rb = str(r.get("branch") or "")
+            title = _clean(str(r.get("title") or ""))[:80]
+            if rb.lower().endswith(".xlsx"):
+                try:
+                    usage = len(store.load_rows(rb))
+                except BadBranch:
+                    usage = 0
+                lines.append(f"{IND*(depth)}📄{rid} {title}")
+                lines.append(f"{IND*(depth+1)}📁 {_clean(os.path.basename(rb))} · {usage}")
+                walk(rb, depth + 2)
+            else:
+                if rb:
+                    title += f" 🔗{_clean(os.path.basename(rb))}"
+                lines.append(f"{IND*(depth)}📄{rid} {title}")
+
+    total = store.count()
+    lines.append("mindmap")
+    lines.append(f"{IND}root((🧠 BRAIN · {total} memories))")
+    walk(MASTER_V2, 2)
     return "\n".join(lines) + "\n"
+
 
 # ---------------------------------------------------------------- mmd -> ops
 
-MEM_RE = re.compile(r"📄(\d+)\s+(.*)")
-NEW_RE = re.compile(r"📄\s+(\S.*)")     # user gõ: 📄 không kèm id
-ZONE_RE = re.compile(r"📁\s*(\S+)")
-TAG_RE = re.compile(r"🏷\s*(.+?)\s*·\s*\d+$")
+MEM_RE = re.compile(r"📄(\d+)\s+(.*)")           # existing memory
+NEW_RE = re.compile(r"📄\s+(\S.*)")              # user typed 📄 with no id
+
 
 def _parse(text: str) -> Dict[str, Dict]:
-    """id -> {zone, tag, brief}. Nhận diện theo EMOJI đầu dòng + số khoảng trắng."""
+    """rid -> {branch, brief}. The enclosing branch = nearest ancestor 📁 line."""
     out: Dict[str, Dict] = {}
-    zone = tag = None
+    # stack of (indent, branch_name); branch_name None = root level (brain.xlsx)
+    stack: List = [(0, None)]
+
+    def enclosing_branch(indent):
+        while len(stack) > 1 and stack[-1][0] >= indent:
+            stack.pop()
+        return stack[-1][1] or MASTER_V2
+
     for line in text.splitlines():
-        stripped = line.lstrip()
-        if not stripped:
+        stripped = line.strip()
+        if not stripped or stripped in ("mindmap",):
             continue
-        indent = len(line) - len(stripped)
-        if stripped.startswith("📁") and indent <= 4:
-            m = ZONE_RE.search(line); zone = m.group(1) if m else zone; tag = None
-        elif stripped.startswith("🏷") and indent <= 6:
-            m = TAG_RE.search(line)
-            if m: tag = m.group(1).strip()
-        elif stripped.startswith("📄") and indent >= 6:
+        indent = len(line) - len(stripped.lstrip(" "))
+        if stripped.startswith("root("):
+            stack = [(indent, None)]
+            continue
+        if stripped.startswith("📁"):
+            m = re.match(r"📁\s*([^\s·]+\.xlsx)", stripped)
+            if m:
+                stack.append((indent, m.group(1)))
+            continue
+        if stripped.startswith("🔗") or stripped.startswith("l:"):
+            continue                                   # leaf pointer — read-only
+        if stripped.startswith("📄"):
+            branch = enclosing_branch(indent)
             m = MEM_RE.match(stripped)
             if m:
                 rid = int(m.group(1))
-                entry = {"zone": zone or "knowledge", "tag": tag or "",
-                         "brief": m.group(2).strip()}
-                if rid in out:
-                    # id TRÙNG trong master index (lỗi dữ liệu excel_line):
-                    # node thứ 2+ mang key 'dup:N' — chỉ đọc, không ops được
-                    n = 2
-                    while f"dup:{rid}:{n}" in out:
-                        n += 1
-                    out[f"dup:{rid}:{n}"] = entry
-                else:
-                    out[rid] = entry
+                brief = re.sub(r"\s*🔗.*$", "", m.group(2)).strip()
+                key = rid if rid not in out else f"dup:{rid}:{len(out)}"
+                out[key] = {"branch": branch, "brief": brief}
             else:
                 m2 = NEW_RE.match(stripped)
                 if m2:
-                    out["new:" + m2.group(1).strip()] = {
-                        "zone": zone or "knowledge", "tag": tag or "",
-                        "brief": m2.group(1).strip()}
+                    brief = re.sub(r"\s*🔗.*$", "", m2.group(1)).strip()
+                    out["new:" + brief] = {"branch": branch, "brief": brief}
     return out
 
-def diff_ops(old: str, new: str) -> List[Dict]:
+
+def diff_ops(old: str, new: str, store: BrainStore = None) -> List[Dict]:
+    """Compare the edited .mmd against the live Excel projection -> ops."""
     a, b = _parse(old), _parse(new)
     ops: List[Dict] = []
-    for rid in a:
-        if isinstance(rid, str):   # 'dup:…' — node ma, bỏ qua mọi ops
-            continue
+    for rid, entry in a.items():
+        if isinstance(rid, str):
+            continue                                   # 'dup:'/'new:' node — ignore
         if rid not in b:
             ops.append({"op": "delete", "id": rid})
         else:
-            if a[rid]["brief"] != b[rid]["brief"]:
-                ops.append({"op": "rename", "id": rid, "topic": b[rid]["brief"]})
-            if a[rid]["zone"] != b[rid]["zone"]:
-                ops.append({"op": "move", "id": rid, "zone": b[rid]["zone"]})
-            elif a[rid]["tag"] != b[rid]["tag"]:
-                ops.append({"op": "move", "id": rid, "tag": b[rid]["tag"]})
-    for rid in b:
-        if rid not in a:
-            ops.append({"op": "add", "zone": b[rid]["zone"], "topic": b[rid]["brief"],
-                        "tag": b[rid]["tag"], "map_new_id": rid})
+            nb = b[rid]
+            if entry["brief"] != nb["brief"]:
+                ops.append({"op": "rename", "id": rid, "topic": nb["brief"],
+                            "branch": entry["branch"]})
+            if entry["branch"] != nb["branch"]:
+                ops.append({"op": "move", "id": rid, "src": entry["branch"],
+                            "dst": nb["branch"]})
+    for key, entry in b.items():
+        if isinstance(key, str) and key.startswith("new:"):
+            ops.append({"op": "add", "branch": entry["branch"],
+                        "topic": entry["brief"], "map_new_id": key})
     return ops
 
+
 if __name__ == "__main__":
-    r = os.environ.get("EXCEL_LINE_ROOT", ".")
+    r = os.environ.get("EXCEL_LINE_ROOT", r"C:\Users\Admin\AppData\Local\hermes\excel_line")
     mmd = build_mmd(r)
-    open(os.path.join(r, "brain.mmd"), "w", encoding="utf-8").write(mmd)
     print("lines:", mmd.count("\n"))
-    # self-test diff rỗng: parse(build) phải cho đúng số memory
     print("memories parsed:", len(_parse(mmd)))
+    # self-test: diffing the projection against itself must yield zero ops
+    print("self-diff ops:", diff_ops(mmd, mmd))
