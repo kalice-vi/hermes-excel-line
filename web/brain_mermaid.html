@@ -4,97 +4,245 @@
 <meta charset="UTF-8">
 <title>🧠 Brain — Mindmap ⇄ excel_line</title>
 <style>
-  html, body { margin:0; height:100%; background:transparent; font-family:system-ui,sans-serif; }
-  #bar { position:fixed; top:0; left:0; right:0; height:34px; z-index:9; display:flex; align-items:center; gap:8px;
-         padding:0 10px; font-size:12px; color:var(--muted-foreground,#666);
-         background:color-mix(in srgb, var(--card,#fafafa) 90%, transparent); border-bottom:1px solid var(--border,#ddd); }
-  #bar button { font-size:12px; padding:3px 9px; border-radius:6px; border:1px solid var(--border,#ccc);
-                background:var(--card,#fff); color:var(--foreground,#222); cursor:pointer; }
-  #bar button:hover { background:color-mix(in srgb, var(--accent,#333) 12%, var(--card,#fff)); }
-  #split { position:absolute; top:34px; left:0; right:0; bottom:0; display:flex; }
-  #left  { width:38%; min-width:0; display:flex; flex-direction:column; overflow:hidden; }
+  html, body { margin:0; height:100%; background:transparent; font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; overflow:hidden; }
+  
+  /* Top Toolbar */
+  #bar { position:fixed; top:0; left:0; right:0; height:36px; z-index:10; display:flex; align-items:center; gap:6px;
+         padding:0 10px; font-size:12px; color:var(--foreground,#222);
+         background:color-mix(in srgb, var(--card,#fcfcfc) 92%, transparent); border-bottom:1px solid var(--border,#ddd);
+         backdrop-filter:blur(8px); }
+  #bar button, #bar select { font-size:12px; padding:3px 8px; border-radius:5px; border:1px solid var(--border,#ccc);
+                             background:var(--card,#fff); color:var(--foreground,#222); cursor:pointer; outline:none; }
+  #bar button:hover, #bar select:hover { background:color-mix(in srgb, var(--accent,#333) 10%, var(--card,#fff)); }
+  .btn-group { display:flex; align-items:center; gap:2px; border:1px solid var(--border,#ccc); border-radius:5px; padding:1px; background:var(--card,#fff); }
+  .btn-group button { border:none; border-radius:4px; padding:2px 7px; }
+  
+  /* Split Layout */
+  #split { position:absolute; top:36px; left:0; right:0; bottom:0; display:flex; }
+  #left  { width:36%; min-width:0; display:flex; flex-direction:column; overflow:hidden; }
   #left.hidden { display:none; }
   #code  { flex:1; width:100%; box-sizing:border-box; border:0; resize:none; outline:none;
-           font:12.5px/1.55 Consolas,'Courier New',monospace; padding:10px 12px;
-           background:color-mix(in srgb, var(--card,#fff) 92%, transparent); color:var(--foreground,#111); }
+           font:12.5px/1.5 Consolas,'Courier New',monospace; padding:10px 12px;
+           background:color-mix(in srgb, var(--card,#fff) 95%, transparent); color:var(--foreground,#111); }
   #dragbar { width:6px; cursor:col-resize; flex:0 0 6px;
              background:var(--border,#ccc); transition:background .15s; }
   #dragbar:hover, #dragbar.active { background:var(--accent,#666); }
-  #right { flex:1; overflow:auto; position:relative; }
-  #c     { width:100%; min-height:100%; display:grid; place-items:center; padding:20px; box-sizing:border-box; }
-  #c svg { max-width:none; }
-  #status { margin-left:auto; white-space:nowrap; }
-  #dirty { color:#b45309; display:none; }
-  .hint  { position:fixed; right:12px; bottom:10px; z-index:5; font-size:11px; color:var(--muted-foreground,#888);
-           background:color-mix(in srgb, var(--card,#fff) 85%, transparent); padding:2px 8px; border-radius:6px;
+  
+  /* Mindmap Canvas Area */
+  #right { flex:1; overflow:hidden; position:relative; background:var(--card,#fafafa); user-select:none; cursor:grab; }
+  #right.panning { cursor:grabbing; }
+  #c     { width:100%; height:100%; display:flex; align-items:center; justify-content:center;
+           transform-origin: 0 0; transition: transform 0.05s ease-out; }
+  #c svg { max-width:none; max-height:none; }
+  
+  /* Status Indicator */
+  #status { margin-left:auto; white-space:nowrap; font-size:11px; color:var(--muted-foreground,#777); }
+  #dirty { color:#b45309; font-weight:bold; display:none; }
+  
+  /* Floating Hint */
+  .hint  { position:fixed; right:12px; bottom:10px; z-index:5; font-size:11px; color:var(--muted-foreground,#777);
+           background:color-mix(in srgb, var(--card,#fff) 85%, transparent); padding:3px 8px; border-radius:6px;
            border:1px solid var(--border,#ddd); pointer-events:none; }
+           
+  /* Hover Detail Tooltip Popup */
+  #tooltip { position:fixed; z-index:99; display:none; max-width:320px; padding:10px 12px; font-size:12px;
+             background:var(--card,#ffffff); color:var(--foreground,#222); border-radius:8px;
+             box-shadow:0 8px 24px rgba(0,0,0,0.16); border:1px solid var(--border,#ccc);
+             pointer-events:none; transition:opacity 0.15s ease, transform 0.15s ease; opacity:0; }
+  #tooltip.visible { opacity:1; }
+  #tooltip .tt-title { font-weight:bold; font-size:13px; margin-bottom:4px; color:var(--accent,#1e40af); }
+  #tooltip .tt-body { line-height:1.45; color:var(--foreground,#333); margin-bottom:6px; word-break:break-word; }
+  #tooltip .tt-meta { font-size:10.5px; color:var(--muted-foreground,#666); border-top:1px solid var(--border,#eee); padding-top:4px; }
 </style>
 </head>
 <body>
+
+<!-- Top Control Toolbar -->
 <div id="bar">
-  <button id="b_apply">⚡ Apply to Excel</button>
-  <button id="b_fmt">🧹 Reformat</button>
-  <button id="b_expand">⊞ Expand all</button>
-  <button id="b_panel">◧ Panel</button>
-  <button id="b_reload">↻ Reload</button>
+  <button id="b_apply" title="Apply changes to Excel">⚡ Apply</button>
+  <button id="b_fmt" title="Reformat code">🧹 Reformat</button>
+  
+  <!-- Template / Theme Selector -->
+  <label style="margin-left:4px;">🎨 Template:</label>
+  <select id="sel_theme" title="Select mindmap theme">
+    <option value="neutral" selected>Slate Clean (Neutral)</option>
+    <option value="dark">Dark Mode (Cyberpunk)</option>
+    <option value="forest">Forest (Emerald)</option>
+    <option value="base">Classic Blue (Base)</option>
+    <option value="default">Vibrant Pastel (Default)</option>
+  </select>
+
+  <!-- Zoom & Pan Controls -->
+  <div class="btn-group" style="margin-left:4px;">
+    <button id="b_zoom_in" title="Zoom In (Wheel UP)">🔍 +</button>
+    <button id="b_zoom_out" title="Zoom Out (Wheel DOWN)">🔍 -</button>
+    <button id="b_zoom_reset" title="Reset View (Fit)">⟲ Reset</button>
+  </div>
+
+  <button id="b_expand" title="Expand all branches">⊞ Expand All</button>
+  <button id="b_panel" title="Toggle code editor panel">◧ Panel</button>
+  <button id="b_reload" title="Reload fresh from Excel">↻ Reload</button>
+  
   <span id="dirty">● unsaved</span>
   <span id="status">loading…</span>
 </div>
+
+<!-- Main Split Container -->
 <div id="split">
   <div id="left"><textarea id="code" spellcheck="false"></textarea></div>
-  <div id="dragbar" title="Drag to resize"></div>
+  <div id="dragbar" title="Drag to resize panel"></div>
   <div id="right">
     <div id="c"></div>
-    <div class="hint">click node = expand/collapse · drag bar = resize panel</div>
+    <div class="hint">scroll = zoom · drag bg = pan · hover node = detail popup · click = toggle</div>
   </div>
 </div>
+
+<!-- Detail Tooltip Card -->
+<div id="tooltip">
+  <div class="tt-title" id="tt_title">Memory Detail</div>
+  <div class="tt-body" id="tt_body">Loading content…</div>
+  <div class="tt-meta" id="tt_meta">Branch / Tags</div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <script>
-// Local vendored fallback if cdn.jsdelivr is offline inside iframe
 if (typeof mermaid === 'undefined') {
   document.write('<script src="mermaid/mermaid.min.js"><\/script>');
 }
 </script>
 <script>
-function boot() {
-  if (typeof mermaid === 'undefined') return false;
-  mermaid.initialize({ startOnLoad: false, theme: 'neutral',
-    mindmap: { padding: 14 }, securityLevel: 'loose' });
-  return true;
-}
-
+// --- State & Variables ---
 const code = document.getElementById('code'), status = document.getElementById('status');
-const dirtyMark = document.getElementById('dirty');
+const dirtyMark = document.getElementById('dirty'), selTheme = document.getElementById('sel_theme');
+const tooltip = document.getElementById('tooltip');
+const ttTitle = document.getElementById('tt_title'), ttBody = document.getElementById('tt_body'), ttMeta = document.getElementById('tt_meta');
+
 let rev = null, syncing = false, applyTimer = null, lastSentText = '';
+let currentTheme = 'neutral';
+let zoomScale = 1.0, panX = 0, panY = 0, isPanning = false, startX = 0, startY = 0;
+const detailCache = new Map();
 
 function setStatus(t) { status.textContent = t; }
 function isDirty() { return code.value !== lastSentText; }
 function setDirty(on) { dirtyMark.style.display = on ? 'inline' : 'none'; }
+
+function applyTransform() {
+  const container = document.getElementById('c');
+  container.style.transform = `translate(${panX}px, ${panY}px) scale(${zoomScale})`;
+}
+
+function resetView() {
+  zoomScale = 1.0; panX = 0; panY = 0;
+  applyTransform();
+}
+
+// --- Initialize Mermaid ---
+function initMermaid(themeName) {
+  if (typeof mermaid === 'undefined') return false;
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: themeName || 'neutral',
+    mindmap: { padding: 16 },
+    securityLevel: 'loose'
+  });
+  return true;
+}
 
 async function fetchMmd() {
   const r = await fetch('/api/mmd?ts=' + Date.now());
   return r.json();
 }
 
+// --- Render SVG Mindmap ---
 function render(txt) {
   const c = document.getElementById('c');
   if (typeof mermaid === 'undefined') {
-    c.innerHTML = '<pre style="padding:16px;color:#b91c1c">⚠ mermaid.js not loaded. Editing still works via text panel.</pre>';
+    c.innerHTML = '<pre style="padding:16px;color:#b91c1c">⚠ mermaid.js not loaded. Text editing still available in panel.</pre>';
     return;
   }
   c.innerHTML = '';
+  initMermaid(currentTheme);
+  
   mermaid.render('mm_' + Date.now(), txt).then(({svg}) => {
     c.innerHTML = svg;
-    // enable interactive click-to-toggle on mermaid mindmap node elements
-    c.querySelectorAll('.mindmap-node, g[class*="node"]').forEach(el => {
-      el.style.cursor = 'pointer';
-    });
+    attachNodeInteractions();
   }).catch(err => {
-    c.innerHTML = '<pre style="padding:14px;color:#b91c1c">⚠ syntax: ' +
+    c.innerHTML = '<pre style="padding:14px;color:#b91c1c">⚠ Syntax Error: ' +
       String(err.message || err).slice(0, 300) + '</pre>';
   });
 }
 
+// --- Node Hover & Detail Popup ---
+function attachNodeInteractions() {
+  const c = document.getElementById('c');
+  c.querySelectorAll('.mindmap-node, g[class*="node"]').forEach(el => {
+    el.style.cursor = 'pointer';
+    
+    // Extract ID (e.g., "📄38 QA pipeline...")
+    const txt = el.textContent || '';
+    const m = txt.match(/📄(\d+)/);
+    if (m) {
+      const rid = m[1];
+      
+      el.addEventListener('mouseenter', async (e) => {
+        showTooltipLoading(rid, e);
+        const data = await getDetail(rid);
+        if (data) showTooltipDetail(data, e);
+      });
+      
+      el.addEventListener('mousemove', (e) => {
+        positionTooltip(e);
+      });
+      
+      el.addEventListener('mouseleave', () => {
+        hideTooltip();
+      });
+    }
+  });
+}
+
+async function getDetail(rid) {
+  if (detailCache.has(rid)) return detailCache.get(rid);
+  try {
+    const r = await fetch('/api/detail?id=' + rid);
+    if (r.ok) {
+      const data = await r.json();
+      detailCache.set(rid, data);
+      return data;
+    }
+  } catch(e) {}
+  return None;
+}
+
+function showTooltipLoading(rid, e) {
+  ttTitle.textContent = `📄 Memory #${rid}`;
+  ttBody.textContent = "Loading detail from Excel...";
+  ttMeta.textContent = "";
+  tooltip.style.display = 'block';
+  tooltip.classList.add('visible');
+  positionTooltip(e);
+}
+
+function showTooltipDetail(d, e) {
+  ttTitle.textContent = `📄 #${d.id}: ${d.title}`;
+  ttBody.textContent = d.content || d.title || "(no content)";
+  ttMeta.textContent = `📍 Branch: ${d.branch} | 🏷 Tags: ${d.tags || 'none'} | 🕒 ${d.updated}`;
+  positionTooltip(e);
+}
+
+function positionTooltip(e) {
+  const x = Math.min(e.clientX + 14, window.innerWidth - 340);
+  const y = Math.min(e.clientY + 14, window.innerHeight - 160);
+  tooltip.style.left = x + 'px';
+  tooltip.style.top = y + 'px';
+}
+
+function hideTooltip() {
+  tooltip.classList.remove('visible');
+  setTimeout(() => { if (!tooltip.classList.contains('visible')) tooltip.style.display = 'none'; }, 150);
+}
+
+// --- Sync Refresh & Apply ---
 async function refresh(force) {
   try {
     const j = await fetchMmd();
@@ -128,6 +276,7 @@ async function applyNow() {
     const j = await r.json();
     if (j.error) { setStatus('⚠ ' + j.error); return; }
     code.value = j.mmd; lastSentText = j.mmd; setDirty(false);
+    detailCache.clear();
     syncing = false;
     render(j.mmd);
     setStatus('✓ ' + (j.applied || 0) + ' change(s) written ' + new Date().toLocaleTimeString());
@@ -135,6 +284,24 @@ async function applyNow() {
   finally { syncing = false; }
 }
 
+// --- Event Handlers & Theme Selector ---
+selTheme.addEventListener('change', (e) => {
+  currentTheme = e.target.value;
+  render(code.value);
+  setStatus(`🎨 Applied Theme: ${currentTheme}`);
+});
+
+document.getElementById('b_zoom_in').onclick = () => {
+  zoomScale = Math.min(zoomScale * 1.2, 4.0);
+  applyTransform();
+};
+
+document.getElementById('b_zoom_out').onclick = () => {
+  zoomScale = Math.max(zoomScale / 1.2, 0.25);
+  applyTransform();
+};
+
+document.getElementById('b_zoom_reset').onclick = resetView;
 document.getElementById('b_apply').onclick = applyNow;
 document.getElementById('b_fmt').onclick = () => { lastSentText=''; refresh(true); setStatus('🧹 reformatted'); };
 document.getElementById('b_reload').onclick = () => { lastSentText = ''; refresh(true); };
@@ -149,7 +316,47 @@ document.getElementById('b_panel').onclick = () => {
   D.style.display = L.classList.contains('hidden') ? 'none' : '';
 };
 
-// ---- draggable splitter ----------------------------------------------------
+// --- Pan & Wheel Zoom Interactivity ---
+const rightPane = document.getElementById('right');
+
+rightPane.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const delta = e.deltaY < 0 ? 1.12 : 0.88;
+  const newScale = Math.min(Math.max(zoomScale * delta, 0.25), 4.0);
+  
+  // Smooth mouse-centered zoom
+  const rect = rightPane.getBoundingClientRect();
+  const mouseX = e.clientX - rect.left;
+  const mouseY = e.clientY - rect.top;
+  
+  panX = mouseX - (mouseX - panX) * (newScale / zoomScale);
+  panY = mouseY - (mouseY - panY) * (newScale / zoomScale);
+  zoomScale = newScale;
+  
+  applyTransform();
+}, { passive: false });
+
+rightPane.addEventListener('mousedown', (e) => {
+  if (e.target.closest('#tooltip')) return;
+  isPanning = true;
+  rightPane.classList.add('panning');
+  startX = e.clientX - panX;
+  startY = e.clientY - panY;
+});
+
+window.addEventListener('mousemove', (e) => {
+  if (!isPanning) return;
+  panX = e.clientX - startX;
+  panY = e.clientY - startY;
+  applyTransform();
+});
+
+window.addEventListener('mouseup', () => {
+  isPanning = false;
+  rightPane.classList.remove('panning');
+});
+
+// --- Draggable Splitter ---
 (() => {
   const bar = document.getElementById('dragbar'), left = document.getElementById('left');
   let dragging = false;
@@ -162,13 +369,15 @@ document.getElementById('b_panel').onclick = () => {
   window.addEventListener('mouseup', () => { dragging = false; bar.classList.remove('active'); });
 })();
 
+// --- Initialization ---
 (async () => {
-  boot();
+  initMermaid('neutral');
   const j = await fetchMmd();
   rev = j.rev; code.value = j.mmd; lastSentText = j.mmd;
   render(j.mmd);
   setStatus('✓ excel_line · ' + (j.mmd.match(/📄/g) || []).length + ' memories');
 })();
+
 setInterval(() => refresh(false), 2000);
 </script>
 </body>

@@ -147,6 +147,21 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send(500, json.dumps({"error": str(e)}, ensure_ascii=False))
             return self._send(200, json.dumps(tree, ensure_ascii=False))
+        if u.path == "/api/detail":
+            rid_str = urllib.parse.parse_qs(u.query).get("id", [""])[0]
+            if rid_str.isdigit():
+                f = store.find(int(rid_str))
+                if f:
+                    return self._send(200, json.dumps({
+                        "id": f["row"]["id"],
+                        "title": f["row"]["title"],
+                        "content": f["row"]["content"],
+                        "tags": f["row"]["tags"],
+                        "branch": f["branch"],
+                        "updated": f["row"]["updated"],
+                        "path": store.path_of(f["row"]["id"])
+                    }, ensure_ascii=False))
+            return self._send(404, json.dumps({"error": "not found"}, ensure_ascii=False))
         if u.path == "/api/search":
             q = urllib.parse.parse_qs(u.query).get("q", [""])[0]
             hits = store.search_index(q, limit=50) if q else []
