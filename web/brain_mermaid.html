@@ -62,14 +62,23 @@
   <button id="b_apply" title="Apply changes to Excel">⚡ Apply</button>
   <button id="b_fmt" title="Reformat code">🧹 Reformat</button>
   
-  <!-- Template / Theme Selector -->
-  <label style="margin-left:4px;">🎨 Template:</label>
-  <select id="sel_theme" title="Select mindmap theme">
-    <option value="neutral" selected>Slate Clean (Neutral)</option>
-    <option value="dark">Dark Mode (Cyberpunk)</option>
-    <option value="forest">Forest (Emerald)</option>
-    <option value="base">Classic Blue (Base)</option>
-    <option value="default">Vibrant Pastel (Default)</option>
+  <!-- Layout Geometry Selector -->
+  <label style="margin-left:4px;">📐 Shape:</label>
+  <select id="sel_layout" title="Select mindmap layout geometry">
+    <option value="mindmap" selected>🧠 Brain (Radial Mindmap)</option>
+    <option value="TD">🔺 Pyramid (Top-Down Tier)</option>
+    <option value="BT">🌲 Tree Upward (Bottom-Up Growth)</option>
+    <option value="LR">➡️ Horizontal (Process Flow)</option>
+  </select>
+
+  <!-- Color Theme Selector -->
+  <label style="margin-left:4px;">🎨 Color:</label>
+  <select id="sel_theme" title="Select mindmap color theme">
+    <option value="neutral" selected>Slate Clean</option>
+    <option value="dark">Dark Mode</option>
+    <option value="forest">Forest Emerald</option>
+    <option value="base">Classic Blue</option>
+    <option value="default">Vibrant Pastel</option>
   </select>
 
   <!-- Zoom & Pan Controls -->
@@ -113,12 +122,12 @@ if (typeof mermaid === 'undefined') {
 <script>
 // --- State & Variables ---
 const code = document.getElementById('code'), status = document.getElementById('status');
-const dirtyMark = document.getElementById('dirty'), selTheme = document.getElementById('sel_theme');
+const dirtyMark = document.getElementById('dirty'), selTheme = document.getElementById('sel_theme'), selLayout = document.getElementById('sel_layout');
 const tooltip = document.getElementById('tooltip');
 const ttTitle = document.getElementById('tt_title'), ttBody = document.getElementById('tt_body'), ttMeta = document.getElementById('tt_meta');
 
 let rev = null, syncing = false, applyTimer = null, lastSentText = '';
-let currentTheme = 'neutral';
+let currentTheme = 'neutral', currentLayout = 'mindmap';
 let zoomScale = 1.0, panX = 0, panY = 0, isPanning = false, startX = 0, startY = 0;
 const detailCache = new Map();
 
@@ -136,6 +145,55 @@ function resetView() {
   applyTransform();
 }
 
+// --- Dynamic Layout Converter (Mindmap -> Graph TD/BT/LR) ---
+function convertMmdToLayout(mmdText, layoutType) {
+  if (layoutType === 'mindmap' || !layoutType) return mmdText;
+  
+  const lines = mmdText.split('\n');
+  const stack = []; // [{indent, id}]
+  const edges = [];
+  const nodes = [];
+  let nodeIdx = 0;
+  
+  lines.forEach(line => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed === 'mindmap') return;
+    const indent = line.search(/\S/);
+    
+    // Clean label
+    let label = trimmed;
+    if (label.startsWith('root((') && label.endsWith('))')) {
+      label = label.slice(5, -2);
+    }
+    
+    // Remove syntax characters that break graph labels
+    let cleanLabel = label.replace(/["\[\]\(\)\{\}<>]/g, ' ').replace(/\s+/g, ' ').trim();
+    const nodeId = 'node_' + (nodeIdx++);
+    
+    // Find parent in stack based on indentation
+    while (stack.length > 0 && stack[stack.length - 1].indent >= indent) {
+      stack.pop();
+    }
+    
+    let shapeStart = '["', shapeEnd = '"]';
+    if (trimmed.startsWith('root((')) { shapeStart = '(("'; shapeEnd = '"))'; }
+    else if (trimmed.startsWith('📁')) { shapeStart = '["'; shapeEnd = '"]'; }
+    else if (trimmed.startsWith('📄')) { shapeStart = '["'; shapeEnd = '"]'; }
+    
+    nodes.push(`${nodeId}${shapeStart}${cleanLabel}${shapeEnd}`);
+    
+    if (stack.length > 0) {
+      const parent = stack[stack.length - 1];
+      edges.push(`  ${parent.id} --> ${nodeId}`);
+    }
+    
+    stack.push({ indent, id: nodeId });
+  });
+  
+  const direction = layoutType.toUpperCase(); // TD, BT, LR
+  return `graph ${direction}\n  ` + nodes.join('\n  ') + '\n' + edges.join('\n');
+}
+
 // --- Initialize Mermaid ---
 function initMermaid(themeName) {
   if (typeof mermaid === 'undefined') return false;
@@ -143,6 +201,7 @@ function initMermaid(themeName) {
     startOnLoad: false,
     theme: themeName || 'neutral',
     mindmap: { padding: 16 },
+    flowchart: { curve: 'basis', nodeSpacing: 30, rankSpacing: 40 },
     securityLevel: 'loose'
   });
   return true;
@@ -154,7 +213,7 @@ async function fetchMmd() {
 }
 
 // --- Render SVG Mindmap ---
-function render(txt) {
+function render(rawTxt) {
   const c = document.getElementById('c');
   if (typeof mermaid === 'undefined') {
     c.innerHTML = '<pre style="padding:16px;color:#b91c1c">⚠ mermaid.js not loaded. Text editing still available in panel.</pre>';
@@ -163,11 +222,13 @@ function render(txt) {
   c.innerHTML = '';
   initMermaid(currentTheme);
   
-  mermaid.render('mm_' + Date.now(), txt).then(({svg}) => {
+  const convertedText = convertMmdToLayout(rawTxt, currentLayout);
+  
+  mermaid.render('mm_' + Date.now(), convertedText).then(({svg}) => {
     c.innerHTML = svg;
     attachNodeInteractions();
   }).catch(err => {
-    c.innerHTML = '<pre style="padding:14px;color:#b91c1c">⚠ Syntax Error: ' +
+    c.innerHTML = '<pre style="padding:14px;color:#b91c1c">⚠ Layout Render Error: ' +
       String(err.message || err).slice(0, 300) + '</pre>';
   });
 }
@@ -175,7 +236,7 @@ function render(txt) {
 // --- Node Hover & Detail Popup ---
 function attachNodeInteractions() {
   const c = document.getElementById('c');
-  c.querySelectorAll('.mindmap-node, g[class*="node"]').forEach(el => {
+  c.querySelectorAll('.mindmap-node, g[class*="node"], .node').forEach(el => {
     el.style.cursor = 'pointer';
     
     // Extract ID (e.g., "📄38 QA pipeline...")
@@ -211,7 +272,7 @@ async function getDetail(rid) {
       return data;
     }
   } catch(e) {}
-  return None;
+  return null;
 }
 
 function showTooltipLoading(rid, e) {
@@ -284,11 +345,17 @@ async function applyNow() {
   finally { syncing = false; }
 }
 
-// --- Event Handlers & Theme Selector ---
+// --- Event Handlers & Layout/Theme Selectors ---
+selLayout.addEventListener('change', (e) => {
+  currentLayout = e.target.value;
+  render(code.value);
+  setStatus(`📐 Applied Shape: ${selLayout.options[selLayout.selectedIndex].text}`);
+});
+
 selTheme.addEventListener('change', (e) => {
   currentTheme = e.target.value;
   render(code.value);
-  setStatus(`🎨 Applied Theme: ${currentTheme}`);
+  setStatus(`🎨 Applied Color: ${selTheme.options[selTheme.selectedIndex].text}`);
 });
 
 document.getElementById('b_zoom_in').onclick = () => {
