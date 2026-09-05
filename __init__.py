@@ -257,7 +257,7 @@ class ExcelLineProvider(MemoryProvider):
             # Auto-extract trigger keywords (no manual list)
             def _extract_triggers(q_text: str) -> list:
                 tokens = re.findall(r"[a-záàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđ]+", q_text.lower())
-                stop = {"tôi","tôi","tôi","tôi","tôi","tôi","tôi","tôi","tôi","tôi","tôi","tôi","tôi","tôi","tôi","là","có","từ","và","hay","cũng","còn","để","trong","với","về","cho","đến","bằng","qua","khi","nếu","thì","mà","nhưng","hoặc","vì","vậy","do","như","nên","lại","từng","bao","từ","trong","của","cho","đến","với","bằng","qua","khi","nếu","thì","mà","nhưng","hay","hoặc","vì","vậy","do","như","còn","lại","từng","có","là","từ","và","hay","cũng","còn","để","trong","với","về","cho","đến","bằng","qua","khi","nếu","thì","mà","nhưng","hay","hoặc","vì","vậy","do","như","nên","còn","lại","từng","bao","nhiêu","lệch","từ","lên","lớn","lớn","lệch","lớn","từ","lệch","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ"}
+                stop = {"tôi", "là", "có", "từ", "và", "hay", "cũng", "còn", "để", "trong", "với", "về", "của", "cho", "đến", "bằng", "qua", "khi", "nếu", "thì", "mà", "nhưng", "hoặc", "vì", "vậy", "do", "đó", "như", "nên", "lại", "theo"}
                 return [w for w in tokens if len(w) > 1 and w not in stop]
             triggers = _extract_triggers(query)
             want_recall = bool(triggers)
@@ -268,7 +268,7 @@ class ExcelLineProvider(MemoryProvider):
             # --- Tree-traversal: men từ brain.xlsx → branch → leaf ---
             def score_row(row, q):
                 """Weighted keyword overlap score via substring match (fuzzy)."""
-                q_words = q.lower().split()
+                q_words = triggers
                 title = (row.get("title") or "").lower()
                 tags  = (row.get("tags")  or "").lower()
                 content = (row.get("content") or "").lower()
@@ -286,33 +286,33 @@ class ExcelLineProvider(MemoryProvider):
                 return score
 
             def walk(branch: str, depth: int) -> list:
-                """Men vào .xlsx, chọn row tốt nhất, men tiếp nếu có branch, trả list hits."""
-                hits = []
+                """Traverse one best child at each level, including descendant scores."""
                 try:
                     rows = self._store.load_rows(branch)
                 except Exception:
-                    return hits
+                    return []
+                candidates = []
                 for row in rows:
-                    s = score_row(row, query)
-                    if s > 0:
-                        hits.append((s, row))
-                if not hits:
-                    return hits
-                # Chọn row có điểm cao nhất
-                hits.sort(key=lambda x: x[0], reverse=True)
-                best_score, best_row = hits[0]
-
-                hits_out = [(best_score, best_row, branch)]
-                sub_branch = str(best_row.get("branch") or "")
-                # Men xuống sub-branch nếu có (dù row có content hay không)
-                if sub_branch.lower().endswith(".xlsx"):
-                    deeper = walk(sub_branch, depth + 1)
-                    hits_out.extend(deeper)
-
-                return hits_out[:10]
+                    own_score = score_row(row, query)
+                    child_branch = str(row.get("branch") or "")
+                    deeper = walk(child_branch, depth + 1) if child_branch.lower().endswith(".xlsx") else []
+                    child_score = deeper[0][0] if deeper else 0
+                    # A parent branch inherits its strongest descendant's score.
+                    total_score = own_score + child_score
+                    if total_score > 0:
+                        candidates.append((total_score, row, branch, deeper))
+                if not candidates:
+                    return []
+                # Pick exactly one of the <=10 rows at this level, then follow it.
+                candidates.sort(key=lambda item: item[0], reverse=True)
+                total_score, best_row, current_branch, deeper = candidates[0]
+                return [(total_score, best_row, current_branch)] + deeper[:9]
 
             # Bắt đầu từ brain.xlsx (layer 1 root)
-            from brain_store import MASTER_V2
+            try:
+                from .brain_store import MASTER_V2
+            except ImportError:
+                from brain_store import MASTER_V2
             tree_hits = walk(MASTER_V2, 0)
             if not tree_hits:
                 return ""
