@@ -253,42 +253,95 @@ class ExcelLineProvider(MemoryProvider):
         if not self._store or not query:
             return ""
         try:
-            # NOTE: we intentionally do NOT call _drain_pending_logs() here.
-            # That would run a synchronous LLM call on every user turn and block
-            # the agent's response (Gemini review #4). Lazy indexing is instead
-            # driven by the background indexer (_schedule_index / on_session_end),
-            # so prefetch stays cheap and never calls the model.
             q_lower = query.lower()
-            # Từ khóa hành động gợi ý user muốn truy xuất memory, không phải hỏi ý kiến.
+            # Từ khóa hành động gợi ý user muốn truy xuất memory
             recall_triggers = [
-                # từ khóa về model / provider / token / chi phí
                 "mô hình", "model", "kiểm thử", "test", "tối ưu", "token", "routing",
                 "provider", "free", "rẻ", "tiết kiệm", "khách quan", "qa",
-                # từ khóa gợi nhớ chung
                 "dùng gì", "sao rồi", "trước đây", "tôi đã", "từng",
-                # chủ đề kế toán đã lưu
-                "sao kê", "seagift", "hóa đơn", "excel", "âm đức", "âm đức",
+                "sao kê", "seagift", "hóa đơn", "excel", "âm đức",
             ]
             want_recall = any(k in q_lower for k in recall_triggers)
             if not want_recall:
                 logger.debug("prefetch: query has no recall trigger; skip: %s", query)
                 return ""
-            # OR-chain các từ khóa của query để search_index khớp được memory cũ
-            keywords = [w for w in re.split(r"[^a-záàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđA-Z0-9_]+", q_lower) if len(w) > 1]
-            if not keywords:
+
+            # --- Tree-traversal: men từ brain.xlsx → branch → leaf ---
+            def score_row(row, q):
+                """Weighted keyword overlap score. Title/tags weighted 2x."""
+                q_words = set(q.lower().split())
+                title = (row.get("title") or "").lower()
+                tags  = (row.get("tags")  or "").lower()
+                content = (row.get("content") or "").lower()
+                score = 0
+                for w in q_words:
+                    if len(w) < 2:
+                        continue
+                    if w in title:
+                        score += 3
+                    if w in tags:
+                        score += 2
+                    if w in content:
+                        score += 1
+                return score
+
+            def walk(branch: str, depth: int) -> list:
+                """Men vào .xlsx, chọn row tốt nhất, men tiếp nếu có branch, trả list hits."""
+                hits = []
+                try:
+                    rows = self._store.load_rows(branch)
+                except Exception:
+                    return hits
+                for row in rows:
+                    s = score_row(row, query)
+                    if s > 0:
+                        hits.append((s, row))
+                if not hits:
+                    return hits
+                # Chọn row có điểm cao nhất
+                hits.sort(key=lambda x: x[0], reverse=True)
+                best_score, best_row = hits[0]
+
+                # Nếu row có content trực tiếp → trả về luôn
+                if best_row.get("content"):
+                    hits_out = [(best_score, best_row, branch)]
+                    # Men tiếp vào sub-branch nếu có
+                    sub_branch = str(best_row.get("branch") or "")
+                    if sub_branch.lower().endswith(".xlsx"):
+                        deeper = walk(sub_branch, depth + 1)
+                        hits_out.extend(deeper)
+                    return hits_out[:10]
+                # Nếu row không có content nhưng có branch → men tiếp
+                sub_branch = str(best_row.get("branch") or "")
+                if sub_branch.lower().endswith(".xlsx"):
+                    return walk(sub_branch, depth + 1)[:10]
+                return hits[:3]
+
+            # Bắt đầu từ brain.xlsx (layer 1 root)
+            tree_hits = walk(self._store._master, 0)
+            if not tree_hits:
                 return ""
-            or_query = " OR ".join(keywords[:8])  # cap to 8 keywords to stay cheap
-            hits = self._store.search_index(or_query, limit=12)
-            if not hits:
-                return ""
-            lines = ["## Excel-Line Memory (index matches)"]
-            for h in hits:
-                lines.append(f"- [{h['zone']}] {h['brief']}  (tags: {h['tags']})")
-            for h in hits[:3]:
-                details = self._store.read_zone(h["path"], limit=3)
-                for d in details:
-                    if d.get("content"):
-                        lines.append(f"  • {d.get('title','')}: {d['content']}")
+
+            lines = ["## Excel-Line Memory (tree path)"]
+            seen_ids = set()
+            for entry in tree_hits:
+                if len(entry) == 3:
+                    score, row, branch = entry
+                else:
+                    score, row = entry
+                    branch = self._store._master
+                rid = row["id"]
+                if rid in seen_ids:
+                    continue
+                seen_ids.add(rid)
+                branch_short = os.path.splitext(os.path.basename(branch))[0]
+                title = row.get("title") or ""
+                content = row.get("content") or ""
+                tags = row.get("tags") or ""
+                if content:
+                    lines.append(f"  • [{branch_short} #{rid}] {title}: {content}")
+                else:
+                    lines.append(f"  • [{branch_short} #{rid}] {title}  (tags: {tags})")
             return "\n".join(lines)
         except Exception as e:
             logger.debug("excel_line prefetch failed: %s", e)
