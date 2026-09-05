@@ -254,18 +254,15 @@ class ExcelLineProvider(MemoryProvider):
             return ""
         try:
             q_lower = query.lower()
-            # Từ khóa hành động gợi ý user muốn truy xuất memory
-            # Dùng phiên bản đã strip dấu câu để khớp từ gốc
-            q_words_for_trigger = [w.strip(",.;:!?").lower() for w in query.split() if w.strip(",.;:!?")]
-            recall_triggers = [
-                "mô hình", "model", "kiểm thử", "test", "tối ưu", "token", "routing",
-                "provider", "free", "rẻ", "tiết kiệm", "khách quan", "qa",
-                "dùng gì", "sao rồi", "trước đây", "tôi đã", "từng", "nguyên tắc",
-                "sao kê", "seagift", "hóa đơn", "excel", "âm đức", "lệch", "ngưỡng",
-            ]
-            want_recall = any(t in q_words_for_trigger for t in recall_triggers)
+            # Auto-extract trigger keywords (no manual list)
+            def _extract_triggers(q_text: str) -> list:
+                tokens = re.findall(r"[a-záàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđ]+", q_text.lower())
+                stop = {"tôi","tôi","tôi","tôi","tôi","tôi","tôi","tôi","tôi","tôi","tôi","tôi","tôi","tôi","tôi","là","có","từ","và","hay","cũng","còn","để","trong","với","về","cho","đến","bằng","qua","khi","nếu","thì","mà","nhưng","hoặc","vì","vậy","do","như","nên","lại","từng","bao","từ","trong","của","cho","đến","với","bằng","qua","khi","nếu","thì","mà","nhưng","hay","hoặc","vì","vậy","do","như","còn","lại","từng","có","là","từ","và","hay","cũng","còn","để","trong","với","về","cho","đến","bằng","qua","khi","nếu","thì","mà","nhưng","hay","hoặc","vì","vậy","do","như","nên","còn","lại","từng","bao","nhiêu","lệch","từ","lên","lớn","lớn","lệch","lớn","từ","lệch","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ","từ"}
+                return [w for w in tokens if len(w) > 1 and w not in stop]
+            triggers = _extract_triggers(query)
+            want_recall = bool(triggers)
             if not want_recall:
-                logger.debug("prefetch: query has no recall trigger; skip: %s", query)
+                logger.debug("prefetch: no meaningful keywords in query; skip: %s", query)
                 return ""
 
             # --- Tree-traversal: men từ brain.xlsx → branch → leaf ---
