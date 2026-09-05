@@ -30,8 +30,8 @@ CONFIG (plugins.excel_line in config.yaml)
 from __future__ import annotations
 
 import json
-import logging
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -255,7 +255,27 @@ class ExcelLineProvider(MemoryProvider):
             # the agent's response (Gemini review #4). Lazy indexing is instead
             # driven by the background indexer (_schedule_index / on_session_end),
             # so prefetch stays cheap and never calls the model.
-            hits = self._store.search_index(query, limit=8)
+            q_lower = query.lower()
+            # Từ khóa hành động gợi ý user muốn truy xuất memory, không phải hỏi ý kiến.
+            recall_triggers = [
+                # từ khóa về model / provider / token / chi phí
+                "mô hình", "model", "kiểm thử", "test", "tối ưu", "token", "routing",
+                "provider", "free", "rẻ", "tiết kiệm", "khách quan", "qa",
+                # từ khóa gợi nhớ chung
+                "dùng gì", "sao rồi", "trước đây", "tôi đã", "từng",
+                # chủ đề kế toán đã lưu
+                "sao kê", "seagift", "hóa đơn", "excel", "âm đức", "âm đức",
+            ]
+            want_recall = any(k in q_lower for k in recall_triggers)
+            if not want_recall:
+                logger.debug("prefetch: query has no recall trigger; skip: %s", query)
+                return ""
+            # OR-chain các từ khóa của query để search_index khớp được memory cũ
+            keywords = [w for w in re.split(r"[^a-záàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđA-Z0-9_]+", q_lower) if len(w) > 1]
+            if not keywords:
+                return ""
+            or_query = " OR ".join(keywords[:8])  # cap to 8 keywords to stay cheap
+            hits = self._store.search_index(or_query, limit=12)
             if not hits:
                 return ""
             lines = ["## Excel-Line Memory (index matches)"]
@@ -265,7 +285,7 @@ class ExcelLineProvider(MemoryProvider):
                 details = self._store.read_zone(h["path"], limit=3)
                 for d in details:
                     if d.get("content"):
-                        lines.append(f"    • {d.get('title','')}: {d['content']}")
+                        lines.append(f"  • {d.get('title','')}: {d['content']}")
             return "\n".join(lines)
         except Exception as e:
             logger.debug("excel_line prefetch failed: %s", e)
