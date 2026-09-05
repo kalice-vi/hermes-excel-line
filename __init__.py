@@ -189,7 +189,7 @@ class ExcelLineProvider(MemoryProvider):
         self._session_id = session_id
         # Auto-restart brain server after gateway restart (port 8766)
         try:
-            import socket, subprocess, os
+            import socket, subprocess
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(0.3)
             try:
                 s.connect(("127.0.0.1", 8766))
@@ -255,21 +255,23 @@ class ExcelLineProvider(MemoryProvider):
         try:
             q_lower = query.lower()
             # Từ khóa hành động gợi ý user muốn truy xuất memory
+            # Dùng phiên bản đã strip dấu câu để khớp từ gốc
+            q_words_for_trigger = [w.strip(",.;:!?").lower() for w in query.split() if w.strip(",.;:!?")]
             recall_triggers = [
                 "mô hình", "model", "kiểm thử", "test", "tối ưu", "token", "routing",
                 "provider", "free", "rẻ", "tiết kiệm", "khách quan", "qa",
-                "dùng gì", "sao rồi", "trước đây", "tôi đã", "từng",
-                "sao kê", "seagift", "hóa đơn", "excel", "âm đức",
+                "dùng gì", "sao rồi", "trước đây", "tôi đã", "từng", "nguyên tắc",
+                "sao kê", "seagift", "hóa đơn", "excel", "âm đức", "lệch", "ngưỡng",
             ]
-            want_recall = any(k in q_lower for k in recall_triggers)
+            want_recall = any(t in q_words_for_trigger for t in recall_triggers)
             if not want_recall:
                 logger.debug("prefetch: query has no recall trigger; skip: %s", query)
                 return ""
 
             # --- Tree-traversal: men từ brain.xlsx → branch → leaf ---
             def score_row(row, q):
-                """Weighted keyword overlap score. Title/tags weighted 2x."""
-                q_words = set(q.lower().split())
+                """Weighted keyword overlap score via substring match (fuzzy)."""
+                q_words = q.lower().split()
                 title = (row.get("title") or "").lower()
                 tags  = (row.get("tags")  or "").lower()
                 content = (row.get("content") or "").lower()
@@ -277,6 +279,7 @@ class ExcelLineProvider(MemoryProvider):
                 for w in q_words:
                     if len(w) < 2:
                         continue
+                    # Substring match (not word-boundary) so partial words score too
                     if w in title:
                         score += 3
                     if w in tags:
@@ -302,20 +305,14 @@ class ExcelLineProvider(MemoryProvider):
                 hits.sort(key=lambda x: x[0], reverse=True)
                 best_score, best_row = hits[0]
 
-                # Nếu row có content trực tiếp → trả về luôn
-                if best_row.get("content"):
-                    hits_out = [(best_score, best_row, branch)]
-                    # Men tiếp vào sub-branch nếu có
-                    sub_branch = str(best_row.get("branch") or "")
-                    if sub_branch.lower().endswith(".xlsx"):
-                        deeper = walk(sub_branch, depth + 1)
-                        hits_out.extend(deeper)
-                    return hits_out[:10]
-                # Nếu row không có content nhưng có branch → men tiếp
+                hits_out = [(best_score, best_row, branch)]
                 sub_branch = str(best_row.get("branch") or "")
+                # Men xuống sub-branch nếu có (dù row có content hay không)
                 if sub_branch.lower().endswith(".xlsx"):
-                    return walk(sub_branch, depth + 1)[:10]
-                return hits[:3]
+                    deeper = walk(sub_branch, depth + 1)
+                    hits_out.extend(deeper)
+
+                return hits_out[:10]
 
             # Bắt đầu từ brain.xlsx (layer 1 root)
             tree_hits = walk(self._store._master, 0)
@@ -325,11 +322,7 @@ class ExcelLineProvider(MemoryProvider):
             lines = ["## Excel-Line Memory (tree path)"]
             seen_ids = set()
             for entry in tree_hits:
-                if len(entry) == 3:
-                    score, row, branch = entry
-                else:
-                    score, row = entry
-                    branch = self._store._master
+                score, row, branch = entry[0], entry[1], entry[2] if len(entry) > 2 else self._store._master
                 rid = row["id"]
                 if rid in seen_ids:
                     continue
