@@ -315,14 +315,15 @@ class ExcelLineProvider(MemoryProvider):
                 return hits_out[:10]
 
             # Bắt đầu từ brain.xlsx (layer 1 root)
-            tree_hits = walk(self._store._master, 0)
+            from brain_store import MASTER_V2
+            tree_hits = walk(MASTER_V2, 0)
             if not tree_hits:
                 return ""
 
             lines = ["## Excel-Line Memory (tree path)"]
             seen_ids = set()
             for entry in tree_hits:
-                score, row, branch = entry[0], entry[1], entry[2] if len(entry) > 2 else self._store._master
+                score, row, branch = entry[0], entry[1], entry[2] if len(entry) > 2 else "brain.xlsx"
                 rid = row["id"]
                 if rid in seen_ids:
                     continue
