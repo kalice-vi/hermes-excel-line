@@ -544,10 +544,13 @@ def search_index(self, query: str, limit: int = 10) -> List[Dict]:
     q = (query or "").lower().strip()
     if not q:
         return []
+    # Support OR-chain: "a OR b OR c" (case-insensitive) => match if ANY keyword present
+    parts = [p.strip() for p in q.split(" or ") if p.strip()]
     hits = []
     for r in _flatten_rows(self):
         blob = " ".join(str(r.get(k) or "") for k in ("title", "content", "tags", "branch")).lower()
-        if q in blob:
+        matched = any(p in blob for p in parts) if parts else (q in blob)
+        if matched:
             hits.append({
                 "id": r["id"],
                 "zone": os.path.splitext(r["_branch"])[0],

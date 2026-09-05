@@ -27,9 +27,12 @@ CONFIG (plugins.excel_line in config.yaml)
     free_model: model id for the classifier (default gemini-3.5-flash-lite)
 """
 
+# excel_line long-term memory provider.
+
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
