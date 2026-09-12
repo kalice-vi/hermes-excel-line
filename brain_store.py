@@ -527,7 +527,15 @@ class BrainStore(ExcelLineStore):
 
 def _flatten_rows(store: BrainStore) -> List[Dict]:
     out = []
+    visited = set()
     def walk(b):
+        # A direct-store legacy zone (for example skill.xlsx) may not yet be
+        # linked from brain.xlsx. Mark every loaded workbook so search still
+        # covers the complete store, not only linked tree nodes.
+        try:
+            visited.add(os.path.normcase(os.path.abspath(store.resolve(b))))
+        except Exception:
+            pass
         for r in store.load_rows(b):
             out.append({**r, "_branch": b})
             rb = str(r.get("branch") or "")
@@ -537,6 +545,22 @@ def _flatten_rows(store: BrainStore) -> List[Dict]:
         walk(MASTER_V2)
     except BadBranch:
         pass
+    # Include unlinked compatibility-zone workbooks created by the v1 API.
+    for root_dir, _, files in os.walk(store._root):
+        for filename in files:
+            if not filename.lower().endswith(".xlsx"):
+                continue
+            path = os.path.join(root_dir, filename)
+            key = os.path.normcase(os.path.abspath(path))
+            if key in visited:
+                continue
+            branch = os.path.relpath(path, store._root).replace("\\", "/")
+            try:
+                visited.add(key)
+                for r in store.load_rows(branch):
+                    out.append({**r, "_branch": branch})
+            except Exception:
+                continue
     return out
 
 

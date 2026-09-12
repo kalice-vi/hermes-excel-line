@@ -250,89 +250,50 @@ class ExcelLineProvider(MemoryProvider):
             pass
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
+        """Recall matching rows across the whole tree, including child branches."""
         if not self._store or not query:
             return ""
         try:
-            q_lower = query.lower()
-            # Auto-extract trigger keywords (no manual list)
-            def _extract_triggers(q_text: str) -> list:
-                tokens = re.findall(r"[a-záàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđ]+", q_text.lower())
-                stop = {"tôi", "là", "có", "từ", "và", "hay", "cũng", "còn", "để", "trong", "với", "về", "của", "cho", "đến", "bằng", "qua", "khi", "nếu", "thì", "mà", "nhưng", "hoặc", "vì", "vậy", "do", "đó", "như", "nên", "lại", "theo"}
-                return [w for w in tokens if len(w) > 1 and w not in stop]
-            triggers = _extract_triggers(query)
-            want_recall = bool(triggers)
-            if not want_recall:
-                logger.debug("prefetch: no meaningful keywords in query; skip: %s", query)
+            tokens = re.findall(
+                r"[a-záàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđ]+",
+                query.lower(),
+            )
+            stop = {"tôi", "là", "có", "từ", "và", "hay", "cũng", "còn", "để", "trong", "với", "về", "của", "cho", "đến", "bằng", "qua", "khi", "nếu", "thì", "mà", "nhưng", "hoặc", "vì", "vậy", "do", "đó", "như", "nên", "lại", "theo"}
+            keywords = [w for w in tokens if len(w) > 1 and w not in stop]
+            if not keywords:
                 return ""
 
-            # --- Tree-traversal: men từ brain.xlsx → branch → leaf ---
-            def score_row(row, q):
-                """Weighted keyword overlap score via substring match (fuzzy)."""
-                q_words = triggers
-                title = (row.get("title") or "").lower()
-                tags  = (row.get("tags")  or "").lower()
-                content = (row.get("content") or "").lower()
-                score = 0
-                for w in q_words:
-                    if len(w) < 2:
-                        continue
-                    # Substring match (not word-boundary) so partial words score too
-                    if w in title:
-                        score += 3
-                    if w in tags:
-                        score += 2
-                    if w in content:
-                        score += 1
-                return score
-
-            def walk(branch: str, depth: int) -> list:
-                """Traverse one best child at each level, including descendant scores."""
-                try:
-                    rows = self._store.load_rows(branch)
-                except Exception:
-                    return []
-                candidates = []
-                for row in rows:
-                    own_score = score_row(row, query)
-                    child_branch = str(row.get("branch") or "")
-                    deeper = walk(child_branch, depth + 1) if child_branch.lower().endswith(".xlsx") else []
-                    child_score = deeper[0][0] if deeper else 0
-                    # A parent branch inherits its strongest descendant's score.
-                    total_score = own_score + child_score
-                    if total_score > 0:
-                        candidates.append((total_score, row, branch, deeper))
-                if not candidates:
-                    return []
-                # Pick exactly one of the <=10 rows at this level, then follow it.
-                candidates.sort(key=lambda item: item[0], reverse=True)
-                total_score, best_row, current_branch, deeper = candidates[0]
-                return [(total_score, best_row, current_branch)] + deeper[:9]
-
-            # Bắt đầu từ brain.xlsx (layer 1 root)
-            try:
-                from .brain_store import MASTER_V2
-            except ImportError:
-                from brain_store import MASTER_V2
-            tree_hits = walk(MASTER_V2, 0)
-            if not tree_hits:
+            # Search the complete tree rather than only traversing from brain.xlsx.
+            # OR-chain keeps natural-language queries useful without requiring an
+            # exact full-query substring match.
+            search_query = " or ".join(keywords[:8])
+            hits = self._store.search_index(search_query, limit=12)
+            # v1 ExcelLineStore treats the query literally; search each
+            # extracted keyword there. BrainStore supports OR-chains natively.
+            if not hits and not hasattr(self._store, "load_rows"):
+                merged = []
+                seen = set()
+                for keyword in keywords[:8]:
+                    for hit in self._store.search_index(keyword, limit=12):
+                        key = (hit.get("id"), hit.get("zone"), hit.get("path"))
+                        if key not in seen:
+                            seen.add(key)
+                            merged.append(hit)
+                hits = merged[:12]
+            if not hits:
                 return ""
 
-            lines = ["## Excel-Line Memory (tree path)"]
-            seen_ids = set()
-            for entry in tree_hits:
-                score, row, branch = entry[0], entry[1], entry[2] if len(entry) > 2 else "brain.xlsx"
-                rid = row["id"]
-                if rid in seen_ids:
-                    continue
-                seen_ids.add(rid)
-                branch_short = os.path.splitext(os.path.basename(branch))[0]
-                title = row.get("title") or ""
-                content = row.get("content") or ""
-                tags = row.get("tags") or ""
-                if content:
-                    lines.append(f"  • [{branch_short} #{rid}] {title}: {content}")
+            lines = [f"## Excel-Line Memory (index matches: {len(hits)})"]
+            for hit in hits:
+                branch = hit.get("zone") or "brain"
+                title = hit.get("title") or ""
+                brief = hit.get("brief") or ""
+                tags = hit.get("tags") or ""
+                if brief and brief != title:
+                    lines.append(f"  • [{branch} #{hit['id']}] {title}: {brief}")
                 else:
-                    lines.append(f"  • [{branch_short} #{rid}] {title}  (tags: {tags})")
+                    suffix = f"  (tags: {tags})" if tags else ""
+                    lines.append(f"  • [{branch} #{hit['id']}] {title}{suffix}")
             return "\n".join(lines)
         except Exception as e:
             logger.debug("excel_line prefetch failed: %s", e)
