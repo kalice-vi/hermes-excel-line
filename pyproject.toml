@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "excel-line"
+version = "2.0.0"
+description = "Harness-agnostic Excel-backed long-term memory with a hierarchical tree store (max 10 rows per workbook)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "excel_line contributors" }]
+keywords = ["memory", "excel", "long-term-memory", "openpyxl", "agent"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+server = ["flask>=3.0"]
+
+[tool.setuptools]
+package-dir = { "" = "." }
+packages = ["excel_line_core"]
+
+[tool.setuptools.package-data]
+excel_line_core = ["*.py"]

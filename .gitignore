@@ -4,6 +4,21 @@ logs/
 __pycache__/
 *.processing
 
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.pyc
+
+# Runtime data
+.id_seq
+retry_*.jsonl
+session_raw_*.jsonl
+
+# Python env
+.venv/
+venv/
+
 # Keep source + tests + docs
 !__init__.py
 !store.py

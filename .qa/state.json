@@ -1,0 +1,55 @@
+{
+  "pipeline": "QA1->QA2 hai nhom, muc tieu tach excel_line thanh repo harness-agnostic",
+  "upgrades": [
+    "backlog ben vung trong file nay",
+    "rubric review co dinh: severity/feasibility/cost/harness-agnostic-score",
+    "chia vong theo hang muc, khong audit 3169 dong cung luc",
+    "QA1 phai chay full test + hermes plugins validate truoc khi tra QA2",
+    "QA1 audit phai dung model MANH (khong free-lite) + scope chat, vi gemini-3.5-flash-lite can budget khi audit 3169 dong (da xay ra round 1)"
+  ],
+  "rounds": [
+    {
+      "round": 1,
+      "scope": "audit toan dien",
+      "status": "DA HOAN THANH (5 issue EXC-001..005)",
+      "issues": ["EXC-001","EXC-002","EXC-003","EXC-004","EXC-005"],
+      "qa1_agent": "sa-0-0ee17a15"
+    },
+    {
+      "round": 2,
+      "scope": "coupling/harness-agnostic",
+      "status": "DA HOAN THANH (8 issue coupling-1..8)",
+      "issues": ["coupling-1","coupling-2","coupling-3","coupling-4","coupling-5","coupling-6","coupling-7","coupling-8"],
+      "qa1_agent": "sa-0-7a7f50cf"
+    },
+    {
+      "round": 3,
+      "scope": "QA2 review 13 issue",
+      "status": "DA HOAN THANH — QA2 duyet 13/13, gom con 7 canonical, kien truc Adapter Pattern",
+      "canonical_issues": ["EXC-001","EXC-003","coupling-7","EXC-002","EXC-004","EXC-005","coupling-8"],
+      "qa2_agent": "sa-0-7c7ab216"
+    },
+    {
+      "round": 4,
+      "scope": "QA1 thiet ke giai phap chi tiet",
+      "status": "DA HOAN THANH — QA1 tra thiet ke 7 giai phap + target_layout",
+      "design_ready": true,
+      "qa1_agent": "sa-0-cb3553eb"
+    },
+    {
+      "round": 5,
+      "scope": "QA2 duyet giai phap",
+      "status": "DA HOAN THANH — QA2 duyet EXC-001 + EXC-003 trong transcript; bi budget truoc khi viet day du atomic_commit_plan, nhung du huong refactor phai atom/runable",
+      "verdict_known": ["EXC-001 duyet", "EXC-003 duyet"],
+      "atomic_plan_note": "QA2 bi budget truoc khi viet day du atomic_commit_plan; orchestrator tu soan thu tu B1..B6 va tiep tuc hanh dong",
+      "qa2_agent": "sa-0-8b370b60"
+    },
+    {
+      "round": 6,
+      "scope": "QA1 hanh dong refactor",
+      "status": "QA1 dang thuc hien (sa-0-2a632430)",
+      "expected_actions": ["baseline tests", "src-layout core clean", "HermesAdapter", "LLM interface", "EXCEL_LINE_HOME", "server manager", "pyproject", "test + validate + commit"],
+      "qa1_agent": "sa-0-2a632430"
+    }
+  ]
+}
