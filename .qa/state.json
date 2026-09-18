@@ -48,20 +48,34 @@
     {
       "round": 6,
       "scope": "ORCHESTRATOR thuc thi refactor (khong giao sub-agent)",
-      "status": "DA HOAN THANH B1 (tach core) + B6 (pyproject) — commit eabb685 da push",
+      "status": "DA HOAN THANH PHAN LON — 5 commit push main",
       "actions": [
         "B1: tao package excel_line_core (store/brain_store/worker) pure Python + openpyxl, zero agent-runtime import",
-        "B6: pyproject.toml (EXC-005) — build wheel OK, cai venv sach OK, import excel_line_core doc lap OK",
         "B-compat: store.py/brain_store.py/worker.py thanh shim re-export, giu tuong thich nguoc",
-        "verified: 82/82 test xanh (21+42+19)",
-        "commit eabb685 pushed to origin/main"
+        "B6: pyproject.toml (EXC-005) — build wheel OK, cai venv sach + openpyxl OK, import excel_line_core doc lap OK",
+        "EXC-003 + coupling-7: excel_line_core/llm.py BaseLLMClient + classify; xoa quick_completion dead import",
+        "EXC-002: EXCEL_LINE_HOME env override + legacy fallback get_hermes_home",
+        "EXC-004: BrainServerManager lifecycle; brain_server nhan EXCEL_LINE_ROOT; scripts/_core_bridge.py resolve core",
+        "cleanup: xoa _py_loader_connector.py unused"
+      ],
+      "verified": [
+        "82/82 tests xanh (21 brain_store + 42 excel_line + 19 v2_e2e)",
+        "python scripts/brain_server.py chay phuc vu http://127.0.0.1:8766",
+        "python -m pip wheel . --no-deps OK",
+        "venv sach + openpyxl cai wheel OK: import excel_line_core BrainStore/ExcelLineStore/BaseLLMClient/classify OK",
+        "grep core: khong con hermes_cli/hermes_constants/agent./tools./ctx. import trong excel_line_core"
       ],
       "remaining": [
-        "EXC-001 (phan con lai): gioi han import Hermes trong __init__.py dung lazy/adapter injection",
-        "EXC-003 + coupling-6 + coupling-7: LLM interface BaseLLMClient + ctx.llm facade (thay quick_completion dead code)",
-        "EXC-002: EXCEL_LINE_HOME env thay get_hermes_home()",
-        "EXC-004: BrainServerManager quan ly lifecycle thay Popen vo Dieu kien",
-        "coupling-8: inject model getter thay doc hermes_cli.config truc tiep"
+        "coupling-6: agent.auxiliary_client.call_llm direct import trong _call_provider; design chuyen thanh injectable Hermes adapter",
+        "coupling-8: hermes_cli.config read trong _load_plugin_config + _model_command list view",
+        "EXC-001 phan con lai: lazy import/adapter injection hoa MemoryProvider + tool_error de __init__ khong import Hermes o module top neu co the"
+      ],
+      "commits": [
+        "eabb685 refactor(core): extract harness-agnostic excel_line_core package",
+        "109c97d refactor(llm): add harness-agnostic BaseLLMClient + drop dead quick_completion",
+        "bd9a766 feat(config): EXCEL_LINE_HOME env override as primary root source",
+        "82a3463 refactor(server): isolate BrainServerManager lifecycle",
+        "d764f64 chore: drop unused _py_loader_connector.py"
       ],
       "qa1_agent": "ORCHESTRATOR (main agent)"
     }
