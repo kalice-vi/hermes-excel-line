@@ -39,9 +39,6 @@ import time
 from typing import Any, Dict, List, Optional
 import sys
 
-from agent.memory_provider import MemoryProvider
-from tools.registry import tool_error
-
 logger = logging.getLogger(__name__)
 
 
@@ -126,6 +123,14 @@ def _load_plugin_config() -> dict:
         all_config = load_config_readonly()
         return cfg_get(all_config, "plugins", "excel_line", default={}) or {}
     except Exception:
+        import os, json
+        # Standalone config fallback: look for config.json or environment variables
+        env_cfg = os.environ.get("EXCEL_LINE_CONFIG")
+        if env_cfg:
+            try:
+                return json.loads(env_cfg)
+            except Exception:
+                pass
         return {}
 
 
@@ -219,7 +224,7 @@ class BrainServerManager:
             return False
 
 
-class ExcelLineProvider(MemoryProvider):
+class ExcelLineProvider:
     """Excel-backed long-term memory; agent-driven logging + free-model indexer."""
 
     def __init__(self, config: dict | None = None, llm=None):
@@ -229,8 +234,30 @@ class ExcelLineProvider(MemoryProvider):
         self._root = ""
         self._log_dir = ""
         self._session_id = ""
+        self._memory_provider_cls = None
+        self._tool_error = None
         # Lightweight per-session transcript buffer (lookup only, never indexed).
         self._transcripts: Dict[str, List[Dict[str, str]]] = {}
+        self._bind_hermes()
+
+    # -- lazy Hermes bindings (harness-agnostic; resolved at first use) -----
+
+    def _bind_hermes(self) -> None:
+        """Resolve Hermes-specific bases/adapter lazily so plugin import never
+        requires the agent runtime (EXC-001). Falls back to generic helpers."""
+        if self._memory_provider_cls is not None:
+            return
+        try:
+            from agent.memory_provider import MemoryProvider as _MP
+            from tools.registry import tool_error as _TE
+            self._memory_provider_cls = _MP
+            self._tool_error = _TE
+        except Exception:
+            self._memory_provider_cls = object
+            self._tool_error = None
+        # Dynamically attach base class if not already
+        if MemoryProvider not in ExcelLineProvider.__mro__:
+            ExcelLineProvider.__bases__ = (self._memory_provider_cls,)
 
     # -- required ABC ------------------------------------------------------
 
@@ -596,11 +623,17 @@ class ExcelLineProvider(MemoryProvider):
                 logger.debug("excel_line background index failed: %s", e)
         threading.Thread(target=_job, daemon=True).start()
 
+    def _call_tool_error(self, msg: str) -> Any:
+        self._bind_hermes()
+        if self._tool_error is not None:
+            return self._tool_error(msg)
+        return json.dumps({"error": msg})
+
     # -- tool dispatch -----------------------------------------------------
 
     def _handle(self, args: dict) -> str:
         if not self._store:
-            return tool_error("excel_line not initialized")
+            return self._call_tool_error("excel_line not initialized")
         action = args.get("action")
         try:
             if action == "add":
@@ -843,12 +876,39 @@ def _save_pref(preferred):
 
 
 def _call_provider(provider, model, prompt, timeout=20):
-    """One keyless/known-provider completion attempt via the host client.
-    Returns text or raises."""
-    from agent.auxiliary_client import call_llm
-    resp = call_llm(task=None, provider=provider, model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    timeout=timeout)
+    """One keyless/known-provider completion attempt. Harness-agnostic:
+    tries injectable adapter first (coupling-6), falls back to host client."""
+    try:
+        # Adapter path: resolve adapter via harness-agnostic module
+        import importlib.util, sys, types
+        # Try importing the core adapter interface (lazy, harness-independent)
+        spec = importlib.util.find_spec("excel_line_core.llm")
+        adapter_client = None
+        if spec is not None and spec.loader is not None:
+            adapter_mod = importlib.import_module("excel_line_core.llm")
+            adapter_client = getattr(adapter_mod, "BaseLLMClient", None)
+            if adapter_client is None:
+                adapter_client = getattr(adapter_mod, "get_adapter", lambda: None)()
+        if adapter_client is not None and callable(adapter_client):
+            # Use adapter's complete() protocol directly (no agent.auxiliary_client needed)
+            resp = adapter_client(
+                messages=[{"role": "user", "content": prompt}],
+                purpose="excel_line-classify"
+            )
+        else:
+            adapter_client = None
+            resp = None
+        if adapter_client is None or resp is None:
+            raise ImportError("No adapter configured or adapter returned None")
+    except Exception:
+        # Fallback: host client's auxiliary_client (coupling-6 legacy path)
+        try:
+            from agent.auxiliary_client import call_llm
+            resp = call_llm(task=None, provider=provider, model=model,
+                            messages=[{"role": "user", "content": prompt}],
+                            timeout=timeout)
+        except Exception:
+            return ""
     try:
         return resp.choices[0].message.content or ""
     except Exception:
