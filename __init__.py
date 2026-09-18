@@ -850,12 +850,9 @@ def _ask_free_model(prompt: str, model: str, llm=None) -> str:
             return (getattr(res, "text", "") or "").strip()
         except Exception:
             return ""
-    # Legacy one-shot helper (existed in older runtimes; gone from core).
-    try:
-        from agent.run_agent import quick_completion  # type: ignore
-        return (quick_completion(prompt, model=model) or "").strip()
-    except Exception:
-        return ""
+    # No facade and no keyless model reachable: report 'LLM down' so the
+    # worker keeps the log retryable (never writes raw text to the store).
+    return ""
 
 
 def _model_command(raw_args: str) -> str:

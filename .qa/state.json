@@ -5,7 +5,8 @@
     "rubric review co dinh: severity/feasibility/cost/harness-agnostic-score",
     "chia vong theo hang muc, khong audit 3169 dong cung luc",
     "QA1 phai chay full test + hermes plugins validate truoc khi tra QA2",
-    "QA1 audit phai dung model MANH (khong free-lite) + scope chat, vi gemini-3.5-flash-lite can budget khi audit 3169 dong (da xay ra round 1)"
+    "QA1 audit phai dung model MANH (khong free-lite) + scope chat, vi gemini-3.5-flash-lite can budget khi audit 3169 dong (da xay ra round 1)",
+    "Viec CO HOC nhieu buoc (refactor thuc thi) phai do orchestrator lam truc tiep, KHONG giao cho sub-agent model lite — sub-agent chi dung cho phan tich/thiet ke/review (da xay ra round 4,5,6: 3/3 sub-agent can budget truoc khi lam duoc viec co hoc)"
   ],
   "rounds": [
     {
@@ -46,10 +47,23 @@
     },
     {
       "round": 6,
-      "scope": "QA1 hanh dong refactor",
-      "status": "QA1 dang thuc hien (sa-0-2a632430)",
-      "expected_actions": ["baseline tests", "src-layout core clean", "HermesAdapter", "LLM interface", "EXCEL_LINE_HOME", "server manager", "pyproject", "test + validate + commit"],
-      "qa1_agent": "sa-0-2a632430"
+      "scope": "ORCHESTRATOR thuc thi refactor (khong giao sub-agent)",
+      "status": "DA HOAN THANH B1 (tach core) + B6 (pyproject) — commit eabb685 da push",
+      "actions": [
+        "B1: tao package excel_line_core (store/brain_store/worker) pure Python + openpyxl, zero agent-runtime import",
+        "B6: pyproject.toml (EXC-005) — build wheel OK, cai venv sach OK, import excel_line_core doc lap OK",
+        "B-compat: store.py/brain_store.py/worker.py thanh shim re-export, giu tuong thich nguoc",
+        "verified: 82/82 test xanh (21+42+19)",
+        "commit eabb685 pushed to origin/main"
+      ],
+      "remaining": [
+        "EXC-001 (phan con lai): gioi han import Hermes trong __init__.py dung lazy/adapter injection",
+        "EXC-003 + coupling-6 + coupling-7: LLM interface BaseLLMClient + ctx.llm facade (thay quick_completion dead code)",
+        "EXC-002: EXCEL_LINE_HOME env thay get_hermes_home()",
+        "EXC-004: BrainServerManager quan ly lifecycle thay Popen vo Dieu kien",
+        "coupling-8: inject model getter thay doc hermes_cli.config truc tiep"
+      ],
+      "qa1_agent": "ORCHESTRATOR (main agent)"
     }
   ]
 }
