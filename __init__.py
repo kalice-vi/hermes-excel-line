@@ -129,18 +129,30 @@ def _load_plugin_config() -> dict:
 
 
 def _root_dir(cfg: dict) -> str:
-    from hermes_constants import get_hermes_home
-    default = str(get_hermes_home()) + "/excel_line"
+    import os
+    default = str(os.environ.get("EXCEL_LINE_HOME", "")) or _legacy_hermes_home() + "/excel_line"
     root = cfg.get("root", default)
-    root = root.replace("$HERMES_HOME", str(get_hermes_home()))
+    home = str(os.environ.get("EXCEL_LINE_HOME", "")) or _legacy_hermes_home()
+    root = root.replace("$EXCEL_LINE_HOME", str(os.environ.get("EXCEL_LINE_HOME", "")))
+    root = root.replace("$HERMES_HOME", home)
     return root
 
 
 def _log_dir(cfg: dict, root: str) -> str:
-    from hermes_constants import get_hermes_home
-    return cfg.get("log_dir", root + "/logs").replace(
-        "$HERMES_HOME", str(get_hermes_home())
+    import os
+    home = str(os.environ.get("EXCEL_LINE_HOME", "")) or _legacy_hermes_home()
+    return cfg.get("log_dir", root + "/logs").replace("$EXCEL_LINE_HOME", str(os.environ.get("EXCEL_LINE_HOME", ""))).replace(
+        "$HERMES_HOME", home
     )
+
+
+def _legacy_hermes_home() -> str:
+    try:
+        from hermes_constants import get_hermes_home
+        return str(get_hermes_home())
+    except Exception:
+        import os
+        return str(os.path.expanduser("~/.hermes"))
 
 
 def _safe_sid(sid: str) -> str:
