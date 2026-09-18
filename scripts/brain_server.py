@@ -21,6 +21,7 @@ PLUGIN = os.path.dirname(HERE)                               # .../excel_line (p
 STATIC = os.path.join(PLUGIN, "web")
 sys.path.insert(0, PLUGIN)
 
+import _core_bridge  # noqa: F401,E402  # resolves excel_line_core in source checkout
 from brain_store import BrainStore, FullError, BadBranch, MASTER_V2  # noqa: E402
 from brain_map import build_tree                                  # noqa: E402
 from mermaid_map import build_mmd, diff_ops                       # noqa: E402

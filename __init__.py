@@ -37,6 +37,7 @@ import os
 import re
 import time
 from typing import Any, Dict, List, Optional
+import sys
 
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
@@ -165,6 +166,59 @@ def _safe_sid(sid: str) -> str:
 # Provider
 # ---------------------------------------------------------------------------
 
+
+class BrainServerManager:
+    """Own the brain-map server lifecycle: probe port, restart if needed.
+
+    Replaces raw ``subprocess.Popen`` blocks (EXC-004) so the provider logic
+    stays decoupled from process management.
+    """
+
+    DEFAULT_PORT = 8766
+
+    def __init__(self, script_path: str, port: int = DEFAULT_PORT,
+                 root: str = "") -> None:
+        self.script_path = script_path
+        self.port = port
+        self.root = root
+
+    def is_running(self) -> bool:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.3)
+        try:
+            s.connect(("127.0.0.1", self.port))
+            return True
+        except Exception:
+            return False
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+    def ensure_running(self) -> bool:
+        """Start the server if the port is closed. Returns True if running."""
+        import subprocess
+        try:
+            if self.is_running():
+                return True
+            if not os.path.exists(self.script_path):
+                return False
+            env = dict(os.environ)
+            if self.root:
+                env.setdefault("EXCEL_LINE_ROOT", self.root)
+            subprocess.Popen([sys.executable or "python", self.script_path],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL,
+                             close_fds=True,
+                             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                             env=env)
+            return True
+        except Exception:
+            return False
+
+
 class ExcelLineProvider(MemoryProvider):
     """Excel-backed long-term memory; agent-driven logging + free-model indexer."""
 
@@ -200,20 +254,12 @@ class ExcelLineProvider(MemoryProvider):
         self._store = BrainStore(self._root)
         self._session_id = session_id
         # Auto-restart brain server after gateway restart (port 8766)
-        try:
-            import socket, subprocess
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(0.3)
-            try:
-                s.connect(("127.0.0.1", 8766))
-                s.close()  # already running
-            except Exception:
-                s.close()
-                script_dir = os.path.join(os.path.dirname(__file__))
-                server_py = os.path.join(script_dir, "scripts", "brain_server.py")
-                if os.path.exists(server_py):
-                    subprocess.Popen(["python", server_py], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
-        except Exception:
-            pass
+        script_dir = os.path.dirname(__file__)
+        manager = BrainServerManager(
+            os.path.join(script_dir, "scripts", "brain_server.py"),
+            root=self._root,
+        )
+        manager.ensure_running()
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [EXCEL_LINE_SCHEMA]
