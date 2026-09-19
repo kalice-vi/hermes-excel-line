@@ -26,3 +26,23 @@ print(store.tree())
 The Hermes entry point in `__init__.py` wraps the core; `store.py`,
 `brain_store.py` and `worker.py` are thin shims kept for backward
 compatibility and still re-export the core API.
+
+## Privacy & model egress
+
+The optional memory classifier can call an LLM to summarize agent I/O logs
+into knowledge rows. **By default it uses the host's own configured model**
+(`preferred = "host"`) — no transcript excerpts leave your machine or account.
+
+Rotation through third-party keyless models is strictly **opt-in**: run
+`/excel-line model auto` (or pick a specific free model by number) to enable
+it. Revert any time with `/excel-line model host`. Until you opt in, nothing
+is sent to any external endpoint.
+
+## Brain viewer server
+
+The bundled brain-map HTTP server (`scripts/brain_server.py`, port 8766) is
+**not started automatically**. Start it manually when needed:
+
+```bash
+python scripts/brain_server.py   # serves http://127.0.0.1:8766
+```

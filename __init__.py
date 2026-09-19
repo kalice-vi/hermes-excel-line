@@ -180,6 +180,7 @@ class BrainServerManager:
     """
 
     DEFAULT_PORT = 8766
+    AUTO_START = False  # Opt-in via config; default False (reviewer ask)
 
     def __init__(self, script_path: str, port: int = DEFAULT_PORT,
                  root: str = "") -> None:
@@ -208,23 +209,41 @@ class BrainServerManager:
         try:
             if self.is_running():
                 return True
+            if not self.AUTO_START:
+                return False
             if not os.path.exists(self.script_path):
                 return False
             env = dict(os.environ)
             if self.root:
                 env.setdefault("EXCEL_LINE_ROOT", self.root)
+            cflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
             subprocess.Popen([sys.executable or "python", self.script_path],
                              stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL,
                              close_fds=True,
-                             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                             creationflags=cflags,
                              env=env)
             return True
         except Exception:
             return False
 
 
-class ExcelLineProvider:
+# ---------------------------------------------------------------------------
+# Harness base-class resolution (EXC-001). Resolved at class-definition time
+# so ExcelLineProvider is a REAL MemoryProvider subclass under Hermes, and a
+# plain object elsewhere (tests / standalone installs) — no fragile
+# __bases__ re-assignment (CPython forbids it: deallocator differs from object).
+# ---------------------------------------------------------------------------
+
+def _resolve_base():
+    try:
+        from agent.memory_provider import MemoryProvider as _MP
+        return _MP
+    except Exception:
+        return object
+
+
+class ExcelLineProvider(_resolve_base()):
     """Excel-backed long-term memory; agent-driven logging + free-model indexer."""
 
     def __init__(self, config: dict | None = None, llm=None):
@@ -234,7 +253,6 @@ class ExcelLineProvider:
         self._root = ""
         self._log_dir = ""
         self._session_id = ""
-        self._memory_provider_cls = None
         self._tool_error = None
         # Lightweight per-session transcript buffer (lookup only, never indexed).
         self._transcripts: Dict[str, List[Dict[str, str]]] = {}
@@ -243,21 +261,15 @@ class ExcelLineProvider:
     # -- lazy Hermes bindings (harness-agnostic; resolved at first use) -----
 
     def _bind_hermes(self) -> None:
-        """Resolve Hermes-specific bases/adapter lazily so plugin import never
+        """Resolve the Hermes tool_error adapter lazily so plugin import never
         requires the agent runtime (EXC-001). Falls back to generic helpers."""
-        if self._memory_provider_cls is not None:
+        if self._tool_error is not None:
             return
         try:
-            from agent.memory_provider import MemoryProvider as _MP
             from tools.registry import tool_error as _TE
-            self._memory_provider_cls = _MP
             self._tool_error = _TE
         except Exception:
-            self._memory_provider_cls = object
             self._tool_error = None
-        # Dynamically attach base class if not already
-        if MemoryProvider not in ExcelLineProvider.__mro__:
-            ExcelLineProvider.__bases__ = (self._memory_provider_cls,)
 
     # -- required ABC ------------------------------------------------------
 
@@ -847,7 +859,7 @@ FREE_ROTATION = [
     "x-preview-f-free",
 ]
 _choice_path = None          # module-level, set by _init_choice_path()
-_preferred = None            # pinned model name (from /excel-line model), or None
+_preferred = "host"          # default to host (user's configured model) — never third-party egress by default
 
 
 def _load_pref() -> dict:
@@ -858,9 +870,10 @@ def _load_pref() -> dict:
         _choice_path = os.path.join(root, "model_choice.json")
         if os.path.exists(_choice_path):
             with open(_choice_path, encoding="utf-8") as f:
-                _preferred = json.load(f).get("preferred")
+                value = json.load(f).get("preferred")
+                _preferred = value if value is not None else "host"
     except Exception:
-        _preferred = None
+        _preferred = "host"
     return {"preferred": _preferred}
 
 

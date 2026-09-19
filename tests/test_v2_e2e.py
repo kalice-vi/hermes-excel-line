@@ -2,16 +2,20 @@
 Chạy trong stub runtime như test suite chính."""
 import importlib, json, os, re, sys, tempfile, types
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-sys.path.insert(0, r"C:\Users\Admin\AppData\Local\hermes\hermes-agent")
-sys.path.insert(0, r"C:\Users\Admin\AppData\Local\hermes\plugins")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PKG_DIR = os.path.dirname(_HERE)                       # the excel_line package dir
+_PLUGINS_DIR = os.path.dirname(_PKG_DIR)                # .../hermes/plugins
+_HERMES_AGENT = os.path.join(_PLUGINS_DIR, os.pardir, "hermes-agent")  # optional
+sys.path.insert(0, os.path.abspath(_HERMES_AGENT))
+sys.path.insert(0, _PLUGINS_DIR)
 
-stub_src = open(r"C:\Users\Admin\AppData\Local\hermes\plugins\excel_line\tests\test_excel_line.py", encoding="utf-8").read()
+stub_src = open(os.path.join(_HERE, "test_excel_line.py"), encoding="utf-8").read()
 m = re.search(r"def _stub_runtime\(\):.*?(?=\ndef )", stub_src, re.S)
 ns = {}; exec("import os,sys,json,types\n" + m.group(0), ns); ns["_stub_runtime"]()
 
 spec = importlib.util.spec_from_file_location(
-    "excel_line", r"C:\Users\Admin\AppData\Local\hermes\plugins\excel_line\__init__.py",
-    submodule_search_locations=[r"C:\Users\Admin\AppData\Local\hermes\plugins\excel_line"])
+    "excel_line", os.path.join(_PKG_DIR, "__init__.py"),
+    submodule_search_locations=[_PKG_DIR])
 xl = importlib.util.module_from_spec(spec); sys.modules["excel_line"] = xl
 spec.loader.exec_module(xl)
 

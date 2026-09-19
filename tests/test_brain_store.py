@@ -1,10 +1,13 @@
 """Test brain_store v2: 10 dòng/file, node/lá, FullError, promote, move, merge."""
 import os, sys, tempfile, traceback
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-sys.path.insert(0, r"C:\Users\Admin\AppData\Local\hermes\plugins")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PKG_DIR = os.path.dirname(_HERE)                       # the excel_line package dir
+_PLUGINS_DIR = os.path.dirname(_PKG_DIR)                # .../hermes/plugins
+sys.path.insert(0, _PLUGINS_DIR)
 import types
 pkg = types.ModuleType("excel_line")
-pkg.__path__ = [r"C:\Users\Admin\AppData\Local\hermes\plugins\excel_line"]
+pkg.__path__ = [_PKG_DIR]
 sys.modules["excel_line"] = pkg
 from excel_line.brain_store import BrainStore, FullError, BadBranch, MAX_ROWS, MASTER_V2
 
