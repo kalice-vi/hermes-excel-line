@@ -114,7 +114,10 @@ def _apply(store, decision: Dict, rec: Dict) -> int:
             store.add(decision.get("branch", "brain.xlsx"),
                       title=str(decision.get("title") or "")[:50],
                       content=str(decision.get("content") or "")[:250],
-                      tags=str(decision.get("tags") or ""))
+                      tags=str(decision.get("tags") or ""),
+                      metadata={key: rec.get(key) for key in
+                                ("profile_id", "user_id", "session_id", "source", "confidence", "entity_links")
+                                if rec.get(key) not in (None, "")})
             return 1
         except FullError:
             # auto-split: tạo node con rồi retry một lần vào trong nó
@@ -124,7 +127,10 @@ def _apply(store, decision: Dict, rec: Dict) -> int:
                 node = store.child(parent, name, title=str(decision.get("title") or name)[:50])
                 store.add(node["file"], title=str(decision.get("title") or "")[:50],
                           content=str(decision.get("content") or "")[:250],
-                          tags=str(decision.get("tags") or ""))
+                          tags=str(decision.get("tags") or ""),
+                          metadata={key: rec.get(key) for key in
+                                    ("profile_id", "user_id", "session_id", "source", "confidence", "entity_links")
+                                    if rec.get(key) not in (None, "")})
                 return 1
             except Exception:
                 return 0

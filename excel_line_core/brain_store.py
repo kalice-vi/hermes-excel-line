@@ -23,8 +23,10 @@ from openpyxl.utils import get_column_letter
 
 try:
     from .store import ExcelLineStore, _now
+    from .retrieval import extract_keywords, rank_rows, row_text
 except ImportError:
     from store import ExcelLineStore, _now  # standalone / single-file test run
+    from retrieval import extract_keywords, rank_rows, row_text
 
 _safe_cell = ExcelLineStore._safe_cell
 
@@ -33,6 +35,66 @@ MASTER_V2 = "brain.xlsx"
 TITLE_CAP = 50
 CONTENT_CAP = 250
 V2_HDR = ["ID", "Title", "Content", "Tags", "Branch", "Updated"]
+META_PREFIX = "excel-meta:"
+META_KEYS = (
+    "profile_id", "user_id", "session_id", "source", "confidence", "entity_links",
+)
+
+
+def _clean_metadata(kwargs: Dict) -> Dict:
+    """Keep retrieval metadata compact, bounded, and JSON-safe.
+
+    Metadata is encoded in the existing Tags cell behind a namespaced prefix,
+    preserving the stable six-column workbook contract and human readability.
+    Unknown keys are ignored so callers cannot smuggle arbitrary payloads into
+    every row.
+    """
+    raw = kwargs.get("metadata")
+    source = raw if isinstance(raw, dict) else kwargs
+    out: Dict = {}
+    for key in META_KEYS:
+        value = source.get(key)
+        if value in (None, ""):
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        if len(text) > 240:
+            text = text[:237] + "..."
+        out[key] = text
+    if "confidence" in out:
+        try:
+            out["confidence"] = max(0.0, min(1.0, float(out["confidence"])))
+        except (TypeError, ValueError):
+            out.pop("confidence", None)
+    return out
+
+
+def _metadata_text(tags: str) -> str:
+    """Extract compact metadata JSON from a Tags cell, if present."""
+    text = str(tags or "")
+    marker = META_PREFIX + "{"
+    start = text.find(marker)
+    if start < 0:
+        return ""
+    try:
+        payload = json.loads(text[start + len(META_PREFIX):])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return json.dumps({key: payload[key] for key in META_KEYS if key in payload},
+                      ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _with_metadata(tags: str, metadata: Dict) -> str:
+    """Append/replace namespaced metadata while leaving user tags untouched."""
+    base = re.sub(r"\s*" + re.escape(META_PREFIX) + r"\{.*?\}\s*", " ", str(tags or ""))
+    base = base.strip(" ,;|")
+    if not metadata:
+        return base
+    encoded = json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return (base + " " + META_PREFIX + encoded).strip()
 
 
 class BadBranch(ValueError):
@@ -172,6 +234,14 @@ class BrainStore(ExcelLineStore):
                 rec["title"] = str(rec.get("title") or "")
                 rec["content"] = str(rec.get("content") or "")
                 rec["tags"] = str(rec.get("tags") or "")
+                metadata = _metadata_text(rec["tags"])
+                if metadata:
+                    try:
+                        rec["metadata"] = json.loads(metadata)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        rec["metadata"] = {}
+                else:
+                    rec["metadata"] = {}
                 b_val = str(rec.get("branch") or "").strip()
                 rec["branch"] = b_val if b_val else None
                 rec["updated"] = str(rec.get("updated") or "")
@@ -215,7 +285,13 @@ class BrainStore(ExcelLineStore):
     # ---------------- CORE OPERATIONS ----------------
     def add(self, branch: str = MASTER_V2, title: str = "", content: str = "",
             tags: str = "", link: str = "", **kwargs) -> int:
-        """Add a row to a branch workbook. Max 10 rows allowed per file."""
+        """Add a row to a branch workbook. Max 10 rows allowed per file.
+
+        Optional metadata is stored in a compact JSON cell rather than changing
+        the stable six-column layout. This keeps old workbooks readable while
+        allowing new rows to carry profile/session/source/confidence/entity
+        links. Values are normalized at the boundary and never trusted as code.
+        """
         if not title and "brief" in kwargs:
             title = str(kwargs["brief"])[:TITLE_CAP]
         if not content and "brief" in kwargs:
@@ -238,13 +314,15 @@ class BrainStore(ExcelLineStore):
             if len(rows) >= MAX_ROWS:
                 raise FullError(target_branch)
             rid = self._next_id()
+            metadata = _clean_metadata(kwargs)
             rec = {
                 "id": rid,
                 "title": (title or "Untitled")[:TITLE_CAP],
                 "content": (content or "")[:CONTENT_CAP],
-                "tags": tags or "",
+                "tags": _with_metadata(tags or "", metadata),
                 "branch": link if link else None,
-                "updated": _now()
+                "updated": _now(),
+                "metadata": metadata,
             }
             rows.append(rec)
             self._write_rows(target_fp, rows)
@@ -275,7 +353,7 @@ class BrainStore(ExcelLineStore):
         return {"node_id": node_id, "parent": parent_rel, "file": child_rel}
 
     def set(self, branch: str, row_id: int, title: str = "", content: str = "",
-            tags: str = "", link: Optional[str] = None) -> bool:
+            tags: str = "", link: Optional[str] = None, **kwargs) -> bool:
         """Update an existing row in a branch workbook."""
         with self._cross_process_lock(timeout=15.0):
             rows = self.load_rows(branch)
@@ -287,11 +365,21 @@ class BrainStore(ExcelLineStore):
                     if content:
                         r["content"] = content[:CONTENT_CAP]
                     if tags is not None and tags != "":
-                        r["tags"] = tags
+                        new_metadata = _clean_metadata(kwargs) if kwargs else dict(r.get("metadata") or {})
+                        r["tags"] = _with_metadata(tags, new_metadata)
+                    elif kwargs:
+                        current_tags = str(r.get("tags") or "").split(META_PREFIX)[0].strip(" ,;|")
+                        r["tags"] = _with_metadata(current_tags, _clean_metadata(kwargs))
                     if link is not None:
                         self._validate_branch_value(link)
                         r["branch"] = link if link else None
                     r["updated"] = _now()
+                    r["metadata"] = _metadata_text(r["tags"])
+                    if isinstance(r["metadata"], str):
+                        try:
+                            r["metadata"] = json.loads(r["metadata"])
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            r["metadata"] = {}
                     hit = True
                     break
             if hit:
@@ -358,8 +446,11 @@ class BrainStore(ExcelLineStore):
             if not f or f["branch"] != src_branch:
                 continue
             r = f["row"]
+            # Carry retrieval metadata across moves; avoid re-encoding an
+            # already namespaced Tags cell as literal user tags.
             self.add(dst_branch, title=r["title"], content=r["content"],
-                     tags=r["tags"], link=r.get("branch") or "")
+                     tags=str(r.get("tags") or "").split(META_PREFIX)[0].strip(" ,;|"),
+                     link=r.get("branch") or "", metadata=r.get("metadata") or {})
             self.rm(src_branch, rid)
             moved += 1
         return moved
@@ -369,10 +460,16 @@ class BrainStore(ExcelLineStore):
         """Compress several row IDs in branch into ONE new summarized memory row."""
         if not row_ids:
             raise BadBranch("merge requires at least one row ID")
+        metadata = {}
+        source_rows = self.load_rows(branch)
+        for rid in row_ids:
+            source = next((r for r in source_rows if r.get("id") == rid), None)
+            if source:
+                metadata.update(source.get("metadata") or {})
         for rid in row_ids:
             self.rm(branch, rid)
         new_id = self.add(branch, title=title[:TITLE_CAP], content=content[:CONTENT_CAP],
-                          tags=tags, link=link)
+                          tags=tags, link=link, metadata=metadata)
         return new_id
 
     # ---------------- LOOKUP & TREE ----------------
@@ -507,12 +604,16 @@ class BrainStore(ExcelLineStore):
         return self.rm(f["branch"], int(row_id))
 
     def update(self, zone: str = "", row_id: int = 0, brief: str = "", content: str = "",
-               title: str = "", tags: str = "") -> bool:
+               title: str = "", tags: str = "", **kwargs) -> bool:
         f = self.find(int(row_id)) if row_id else None
         if not f:
             return False
+        effective_tags = tags
+        if not effective_tags and not kwargs:
+            effective_tags = ""
         return self.set(f["branch"], int(row_id),
-                        title=(title or brief)[:TITLE_CAP], content=content, tags=tags)
+                        title=(title or brief)[:TITLE_CAP], content=content,
+                        tags=effective_tags, **kwargs)
 
     def forget(self, query: str) -> int:
         q = (query or "").lower().strip()
@@ -564,26 +665,48 @@ def _flatten_rows(store: BrainStore) -> List[Dict]:
     return out
 
 
-def search_index(self, query: str, limit: int = 10) -> List[Dict]:
-    q = (query or "").lower().strip()
-    if not q:
+def search_index(self, query: str, limit: int = 10, *, filters: Optional[Dict] = None,
+                  tier: str = "all") -> List[Dict]:
+    """Tiered lexical search across the whole tree.
+
+    ``exact`` returns literal full-query/phrase matches, ``tokens`` ranks rows
+    with extracted keywords, and ``all`` keeps exact hits first before adding
+    ranked fallback candidates. Filters apply before any limit is enforced.
+    """
+    raw_query = (query or "").strip()
+    if not raw_query:
         return []
-    # Support OR-chain: "a OR b OR c" (case-insensitive) => match if ANY keyword present
-    parts = [p.strip() for p in q.split(" or ") if p.strip()]
-    hits = []
-    for r in _flatten_rows(self):
-        blob = " ".join(str(r.get(k) or "") for k in ("title", "content", "tags", "branch")).lower()
-        matched = any(p in blob for p in parts) if parts else (q in blob)
-        if matched:
-            hits.append({
-                "id": r["id"],
-                "zone": os.path.splitext(r["_branch"])[0],
-                "brief": r.get("title") or str(r.get("content") or "")[:120],
-                "title": r.get("title"),
-                "path": self.resolve(r["_branch"]),
-                "tags": r.get("tags") or ""
-            })
-    return hits[:limit]
+    rows = _flatten_rows(self)
+    exact_terms = [part.strip().casefold() for part in raw_query.split(" or ") if part.strip()]
+    exact_hits: List[Dict] = []
+    ranked_hits: List[Dict] = []
+    for r in rank_rows(raw_query, rows, limit=max(limit * 4, limit), filters=filters):
+        blob = row_text(r)
+        exact_match = any(part and part in blob for part in exact_terms) if exact_terms else False
+        item = {
+            "id": r["id"],
+            "zone": os.path.splitext(r["_branch"])[0],
+            "branch": r["_branch"],
+            "brief": r.get("title") or str(r.get("content") or "")[:120],
+            "content": r.get("content") or "",
+            "title": r.get("title"),
+            "path": self.path_of(r["id"]) if hasattr(self, "path_of") else self.resolve(r["_branch"]),
+            "tags": r.get("tags") or "",
+            "metadata": dict(r.get("metadata") or {}),
+            "relevance": r.get("relevance", 0.0),
+            "match_terms": r.get("match_terms", []),
+        }
+        if exact_match:
+            item["tier"] = "exact"
+            exact_hits.append(item)
+        else:
+            item["tier"] = "tokens"
+            ranked_hits.append(item)
+    if tier == "exact":
+        return exact_hits[: max(0, int(limit or 0))]
+    if tier == "tokens":
+        return ranked_hits[: max(0, int(limit or 0))]
+    return (exact_hits + ranked_hits)[: max(0, int(limit or 0))]
 
 
 BrainStore.search_index = search_index

@@ -102,11 +102,20 @@ EXCEL_LINE_SCHEMA = {
             "tags": {"type": "string", "description": "comma keywords for branch navigation."},
             "link": {"type": "string",
                      "description": "add: LEAF asset path rel root that must exist (e.g. 'skill/x.py'); omit for plain memory."},
+            "profile_id": {"type": "string", "description": "Optional owning Hermes profile scope."},
+            "user_id": {"type": "string", "description": "Optional gateway/user scope."},
+            "source": {"type": "string", "description": "Provenance such as tool, built-in-sync, or import."},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1,
+                           "description": "Optional trust/reliability hint used only as a ranking tie-breaker."},
+            "entity_links": {"type": "string",
+                             "description": "Optional comma-separated entities related to this memory."},
             "row_id": {"type": "integer", "description": "update/delete/promote: row id."},
             "query": {"type": "string", "description": "search/forget keyword."},
             "zone": {"type": "string", "description": "Legacy alias of branch for read/add."},
             "brief": {"type": "string", "description": "Legacy alias: title/content for direct store."},
             "limit": {"type": "integer", "description": "Max rows (default 10)."},
+            "tier": {"type": "string", "enum": ["exact", "tokens", "all"],
+                     "description": "Search tier: literal match, token-ranked fallback, or both."},
         },
         "required": ["action"],
     },
@@ -254,6 +263,9 @@ class ExcelLineProvider(_resolve_base()):
         self._log_dir = ""
         self._session_id = ""
         self._tool_error = None
+        self._profile_id = ""
+        self._user_id = ""
+        self._last_recall = {"count": 0, "query": "", "tiers": {}, "injected": 0}
         # Lightweight per-session transcript buffer (lookup only, never indexed).
         self._transcripts: Dict[str, List[Dict[str, str]]] = {}
         self._bind_hermes()
@@ -291,7 +303,9 @@ class ExcelLineProvider(_resolve_base()):
         os.makedirs(self._log_dir, exist_ok=True)
         from .brain_store import BrainStore
         self._store = BrainStore(self._root)
-        self._session_id = session_id
+        self._session_id = session_id or ""
+        self._profile_id = str(kwargs.get("profile_id") or kwargs.get("agent_identity") or "")
+        self._user_id = str(kwargs.get("user_id") or "")
         # Auto-restart brain server after gateway restart (port 8766)
         script_dir = os.path.dirname(__file__)
         manager = BrainServerManager(
@@ -302,6 +316,55 @@ class ExcelLineProvider(_resolve_base()):
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [EXCEL_LINE_SCHEMA]
+
+    def recall_status(self):
+        """Return the exact number selected for the most recent prefetch."""
+        try:
+            from agent.memory_provider import RecallStatus
+        except Exception:
+            return None
+        status = self._last_recall
+        return RecallStatus(
+            provider_label=self.name,
+            count=int(status.get("count") or 0),
+        )
+
+    def backup_paths(self) -> List[str]:
+        """Return configured external storage roots that Hermes backup must include.
+
+        ``root`` can be outside ``$HERMES_HOME`` for profile-safe deployments;
+        log_dir is included separately when it is not already under root.
+        Existing paths only are returned. Core ``hermes backup`` stores paths
+        outside HERMES_HOME relative to the user's home and skips paths outside
+        home for portability; paths already under HERMES_HOME are covered by
+        the normal root walk and therefore omitted here.
+        """
+        try:
+            from hermes_constants import get_hermes_home
+            hermes_home = os.path.abspath(os.path.expanduser(str(get_hermes_home())))
+        except Exception:
+            hermes_home = os.path.abspath(os.path.expanduser(str(self._config.get("hermes_home") or "")))
+        paths: List[str] = []
+        for value in (self._root, self._log_dir):
+            if not value:
+                continue
+            path = os.path.abspath(os.path.expandvars(os.path.expanduser(str(value))))
+            if not os.path.exists(path):
+                continue
+            try:
+                if os.path.commonpath([path, hermes_home]) == hermes_home:
+                    continue
+            except ValueError:
+                pass
+            try:
+                already_covered = any(os.path.normcase(path) == os.path.normcase(existing) or
+                                      os.path.commonpath([path, existing]) == existing
+                                      for existing in paths)
+            except ValueError:
+                already_covered = False
+            if not already_covered:
+                paths.append(path)
+        return paths
 
     # -- prompt + recall ---------------------------------------------------
 
@@ -348,52 +411,76 @@ class ExcelLineProvider(_resolve_base()):
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         """Recall matching rows across the whole tree, including child branches."""
+        self._last_recall = {"count": 0, "query": query or "", "tiers": {}, "injected": 0}
         if not self._store or not query:
             return ""
         try:
-            tokens = re.findall(
-                r"[a-záàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđ]+",
-                query.lower(),
-            )
-            stop = {"tôi", "là", "có", "từ", "và", "hay", "cũng", "còn", "để", "trong", "với", "về", "của", "cho", "đến", "bằng", "qua", "khi", "nếu", "thì", "mà", "nhưng", "hoặc", "vì", "vậy", "do", "đó", "như", "nên", "lại", "theo"}
-            keywords = [w for w in tokens if len(w) > 1 and w not in stop]
+            from .excel_line_core.retrieval import extract_keywords
+            keywords = extract_keywords(query, limit=8)
             if not keywords:
                 return ""
 
-            # Search the complete tree rather than only traversing from brain.xlsx.
-            # OR-chain keeps natural-language queries useful without requiring an
-            # exact full-query substring match.
-            search_query = " or ".join(keywords[:8])
-            hits = self._store.search_index(search_query, limit=12)
-            # v1 ExcelLineStore treats the query literally; search each
-            # extracted keyword there. BrainStore supports OR-chains natively.
-            if not hits and not hasattr(self._store, "load_rows"):
-                merged = []
-                seen = set()
-                for keyword in keywords[:8]:
-                    for hit in self._store.search_index(keyword, limit=12):
-                        key = (hit.get("id"), hit.get("zone"), hit.get("path"))
-                        if key not in seen:
-                            seen.add(key)
-                            merged.append(hit)
-                hits = merged[:12]
+            search_filters = {}
+            if self._profile_id:
+                search_filters["profile_id"] = [self._profile_id, ""]
+            if self._user_id:
+                search_filters["user_id"] = [self._user_id, ""]
+            if session_id or self._session_id:
+                search_filters["session_id"] = [session_id or self._session_id, ""]
+
+            try:
+                exact = self._store.search_index(query, limit=6, filters=search_filters,
+                                                  tier="exact")
+            except TypeError:
+                exact = self._store.search_index(query, limit=6)
+            exact = exact or []
+            exact_keys = {(hit.get("id"), hit.get("branch") or hit.get("zone")) for hit in exact}
+            try:
+                token_hits = self._store.search_index(" or ".join(keywords), limit=12,
+                                                      filters=search_filters, tier="tokens")
+            except TypeError:
+                token_hits = []
+                for keyword in keywords:
+                    token_hits.extend(self._store.search_index(keyword, limit=12))
+            merged = list(exact)
+            for hit in token_hits:
+                key = (hit.get("id"), hit.get("branch") or hit.get("zone"))
+                if key not in exact_keys:
+                    merged.append(hit)
+            hits = merged[:12]
             if not hits:
                 return ""
 
+            max_chars = max(600, int(self._config.get("prefetch_max_chars", 6000)))
+            max_items = max(1, int(self._config.get("prefetch_max_items", 8)))
+            hits = hits[:max_items]
             lines = [f"## Excel-Line Memory (index matches: {len(hits)})"]
             for hit in hits:
                 branch = hit.get("zone") or "brain"
                 title = hit.get("title") or ""
-                brief = hit.get("brief") or ""
+                content = hit.get("content") or hit.get("brief") or ""
                 tags = hit.get("tags") or ""
-                if brief and brief != title:
-                    lines.append(f"  • [{branch} #{hit['id']}] {title}: {brief}")
+                if content and content != title:
+                    lines.append(f"  • [{branch} #{hit['id']}] {title}: {content}")
                 else:
                     suffix = f"  (tags: {tags})" if tags else ""
                     lines.append(f"  • [{branch} #{hit['id']}] {title}{suffix}")
-            return "\n".join(lines)
+            rendered = "\n".join(lines)
+            if len(rendered) > max_chars:
+                rendered = rendered[:max_chars].rstrip() + "\n  • [truncated by configured prefetch budget]"
+            injected = max(0, rendered.count("\n  • [") - (1 if rendered.endswith("truncated by configured prefetch budget]") else 0))
+            tiers: Dict[str, int] = {}
+            for hit in hits:
+                tier = str(hit.get("tier") or "tokens")
+                tiers[tier] = tiers.get(tier, 0) + 1
+            self._last_recall = {
+                "count": len(hits), "query": query or "", "tiers": tiers,
+                "injected": injected,
+            }
+            return rendered
         except Exception as e:
             logger.debug("excel_line prefetch failed: %s", e)
+            self._last_recall = {"count": 0, "query": query or "", "tiers": {}, "injected": 0}
             return ""
 
     def sync_turn(self, user_content: str, assistant_content: str, *,
@@ -459,6 +546,13 @@ class ExcelLineProvider(_resolve_base()):
                     content=content[:300],
                     title="mirrored:" + target,
                     tags="memory-md",
+                    metadata={
+                        "profile_id": self._profile_id,
+                        "user_id": self._user_id,
+                        "session_id": self._session_id,
+                        "source": "builtin-memory-sync",
+                        "confidence": 1.0,
+                    },
                 )
             except Exception as e:
                 logger.debug("excel_line mirror failed: %s", e)
@@ -580,7 +674,13 @@ class ExcelLineProvider(_resolve_base()):
             # needed, so nothing to delete later.
             try:
                 rid = self._store.add(zone=zone, brief=brief, content=content,
-                                     title=brief[:40], tags=tags or "auto-extract")
+                                     title=brief[:40], tags=tags or "auto-extract",
+                                     metadata={
+                                         "profile_id": self._profile_id,
+                                         "user_id": self._user_id,
+                                         "session_id": self._session_id,
+                                         "source": "session-end-auto-extract",
+                                     })
                 if rid and rid > 0:
                     stored += 1
             except Exception as e:
@@ -692,11 +792,18 @@ class ExcelLineProvider(_resolve_base()):
                 except Exception as e:
                     return tool_error(str(e))
             if action == "search":
-                hits = (self._store.search(args.get("query", ""),
-                                           limit=int(args.get("limit", 10)))
-                        if hasattr(self._store, "search")
-                        else self._store.search_index(args.get("query", ""),
-                                                      limit=int(args.get("limit", 10))))
+                search_filters = {key: args[key] for key in
+                                  ("profile_id", "user_id", "session_id", "source")
+                                  if args.get(key) not in (None, "")}
+                search_tier = args.get("tier") if args.get("tier") in ("exact", "tokens", "all") else "all"
+                if hasattr(self._store, "search_index"):
+                    hits = self._store.search_index(args.get("query", ""),
+                                                    limit=int(args.get("limit", 10)),
+                                                    filters=search_filters,
+                                                    tier=search_tier)
+                else:
+                    hits = self._store.search_index(args.get("query", ""),
+                                                    limit=int(args.get("limit", 10)))
                 return json.dumps({"results": hits, "count": len(hits)})
             if action == "read":
                 br = args.get("branch") or args.get("zone") or "brain.xlsx"
@@ -720,7 +827,10 @@ class ExcelLineProvider(_resolve_base()):
                     brief=(args.get("brief") or "").strip()[:120],
                     content=(args.get("content") or "").strip()[:300],
                     title=(args.get("title") or "").strip()[:40],
-                    tags=(args.get("tags") or "").strip())
+                    tags=(args.get("tags") or "").strip(),
+                    metadata={key: args.get(key) for key in
+                              ("profile_id", "user_id", "session_id", "source", "confidence", "entity_links")
+                              if args.get(key) not in (None, "")})
                 return json.dumps({"status": "updated" if ok else "not_found", "id": rid, "zone": zone})
             if action == "delete":
                 zone = (args.get("zone") or "knowledge").strip()
@@ -763,17 +873,38 @@ class ExcelLineProvider(_resolve_base()):
         title = (args.get("title") or brief[:50]).strip()
         tags = (args.get("tags") or "").strip()
         link = (args.get("link") or "").strip()
+        metadata = {key: args.get(key) for key in
+                    ("profile_id", "user_id", "session_id", "source", "confidence", "entity_links")
+                    if args.get(key) not in (None, "")}
+        if not metadata.get("profile_id"):
+            metadata["profile_id"] = self._profile_id
+        if not metadata.get("user_id"):
+            metadata["user_id"] = self._user_id
+        if not metadata.get("session_id"):
+            metadata["session_id"] = sid
+        metadata.setdefault("source", "excel_line-tool")
         if (branch or zone) and (title or content or brief):
             from .brain_store import FullError
             try:
                 if branch or link:
                     mid = self._store.add(branch or zone or "brain.xlsx",
                                           title=title[:50], content=content[:250],
-                                          tags=tags, link=link)
-                else:
+                                          tags=tags, link=link, metadata=metadata)
+                elif hasattr(self._store, "load_rows"):
                     mid = self._store.add(zone=zone, brief=brief[:250],
                                           content=content[:250], title=title[:50],
-                                          tags=tags)
+                                          tags=tags, metadata=metadata)
+                else:
+                    # Legacy v1 store has no metadata column; keep direct-store
+                    # compatibility and expose scope in its existing Tags cell.
+                    legacy_tags = tags
+                    if metadata:
+                        legacy_tags = (tags + " " if tags else "") + " ".join(
+                            f"{key}={metadata[key]}" for key in sorted(metadata)
+                        )
+                    mid = self._store.add(zone=zone, brief=brief[:250],
+                                          content=content[:250], title=title[:50],
+                                          tags=legacy_tags)
                 if not mid or mid < 0:
                     return json.dumps({
                         "status": "error", "id": mid, "branch": branch or zone,
@@ -783,6 +914,7 @@ class ExcelLineProvider(_resolve_base()):
                     "status": "stored", "id": mid,
                     "branch": branch or zone,
                     "path": self._store.path_of(mid) if hasattr(self._store, "path_of") else "",
+                    "metadata": metadata,
                     "note": "Written to the Excel tree (no indexer needed).",
                 })
             except Exception as e:
@@ -791,7 +923,7 @@ class ExcelLineProvider(_resolve_base()):
                         "status": "branch_full", "error": str(e),
                         "note": "File is full (10/10). Please merge/compress older rows (select similar IDs) OR create a child() branch and retry.",
                     })
-                return tool_error(f"Direct store failed: {e}")
+                return self._call_tool_error(f"Direct store failed: {e}")
 
         # --- Sequence / direct-log modes: go through the log + indexer ---
         direct_in = (args.get("input_text") or "").strip()
