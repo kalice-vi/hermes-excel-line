@@ -1,6 +1,6 @@
 """QA v2 đầu cuối: provider + BrainStore + rotation + worker tri-state.
 Chạy trong stub runtime như test suite chính."""
-import importlib, json, os, re, sys, tempfile, types
+import importlib.util, json, os, re, sys, tempfile, types
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PKG_DIR = os.path.dirname(_HERE)                       # the excel_line package dir
