@@ -28,3 +28,5 @@ venv/
 !CHANGELOG_PR.md
 !qa_excel_line.py
 !tests/
+# uv environment lock (plugin uses pip_dependencies at runtime, not uv)
+uv.lock
