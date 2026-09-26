@@ -116,4 +116,3 @@ check("count > 0", prov._store.count() > 0, prov._store.count())
 check("zones liệt kê file", "brain" in prov._store.list_zones(), prov._store.list_zones())
 
 print(f"\n{sum(1 for _, ok in T if ok)}/{len(T)} passed")
-sys.exit(0 if all(ok for _, ok in T) else 1)

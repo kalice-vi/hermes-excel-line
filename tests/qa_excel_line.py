@@ -64,7 +64,8 @@ def main():
     print("QA RESULT:", "PASS" if ok else "FAIL")
     print("count:", prov._store.count(), "| prompt_block head:",
           prov.system_prompt_block().splitlines()[0])
-    sys.exit(0 if ok else 1)
+    if not ok:
+        raise AssertionError("qa failed")
 
 if __name__ == "__main__":
     main()

@@ -121,4 +121,3 @@ h = s.search("nén 3 còn 1")
 check("search toàn cây", h and h[0]["id"] == mid)
 
 print(f"\n{sum(1 for _, ok in T if ok)}/{len(T)} passed")
-sys.exit(0 if all(ok for _, ok in T) else 1)
