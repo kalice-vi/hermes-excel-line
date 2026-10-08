@@ -1,5 +1,12 @@
 """__init__.py — Hermes memory provider entry point for excel_line.
 
+THIS MODULE PROVIDES A HERMES MEMORY PROVIDER. It subclasses
+``MemoryProvider`` (via :func:`_resolve_base`) and calls
+``ctx.register_memory_provider(provider)`` in :func:`register`. The keyword is
+repeated here so Hermes' cheap first-8192-bytes text heuristic
+(``plugins.memory._is_memory_provider_dir``) recognises this directory as a
+memory provider at install time; `find_provider_dir` relies on it.
+
 INTRODUCTION
     This is the plugin's public surface: it registers the excel_line memory
     provider with Hermes and wires together the three moving parts — the tool
